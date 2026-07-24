@@ -67,6 +67,14 @@ const messagesRoutes: FastifyPluginCallback<MessagesRouteOptions> = (app, option
           },
           nodeId,
         );
+        socketManager.broadcast(
+          {
+            type: 'done',
+            nodeId,
+            timestamp: Date.now(),
+          },
+          nodeId,
+        );
       }
     });
   });

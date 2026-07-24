@@ -12,11 +12,12 @@ export function useSendMessage(): {
   const activeNodeId = useChatStore((s) => s.activeNodeId);
   const addUser = useChatStore((s) => s.addUser);
   const setStreaming = useChatStore((s) => s.setStreaming);
+  const isStreaming = useChatStore((s) => s.isStreaming);
   const [sending, setSending] = useState(false);
 
   const handleSend = async (text: string): Promise<void> => {
     const content = text.trim();
-    if (!content || sending) return;
+    if (!content || sending || isStreaming) return;
     setSending(true);
     addUser(content); // 乐观插入用户消息
     try {

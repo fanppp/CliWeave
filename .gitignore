@@ -6,6 +6,7 @@ dist/
 .env
 .env.local
 .DS_Store
+*.tsbuildinfo
 # per-node codex home：对话(sessions)留项目里，但 auth/config/日志是秘密或噪音，不提交
 agents/*/memory/.codex/auth.json
 agents/*/memory/.codex/config.toml

@@ -2,13 +2,16 @@
 
 import { useState, type KeyboardEvent } from 'react';
 import { useSendMessage } from '../hooks/useSendMessage';
+import { useChatStore } from '../stores/chatStore';
 
 export function ChatInput() {
   const { handleSend, sending } = useSendMessage();
+  const isStreaming = useChatStore((s) => s.isStreaming);
   const [text, setText] = useState('');
+  const busy = sending || isStreaming;
 
   const submit = async (): Promise<void> => {
-    if (!text.trim()) return;
+    if (!text.trim() || busy) return;
     await handleSend(text);
     setText('');
   };
@@ -22,24 +25,33 @@ export function ChatInput() {
 
   return (
     <div style={styles.bar}>
-      <textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={onKeyDown}
-        placeholder='给 Agent 发消息…（如：把输入框改宽一点）'
-        rows={4}
-        style={styles.input}
-        disabled={sending}
-      />
-      <button onClick={() => void submit()} disabled={sending || !text.trim()} style={styles.btn}>
-        发送
-      </button>
+      <div style={{ ...styles.state, color: busy ? 'var(--text-muted)' : 'var(--success)' }}>
+        <span style={{ ...styles.stateDot, background: busy ? 'var(--accent)' : 'var(--success)' }} />
+        {busy ? 'Agent 执行中，请等待本次任务完成' : 'Agent 已就绪，可以发送任务'}
+      </div>
+      <div style={styles.controls}>
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder={busy ? '当前任务完成后可继续输入' : '给 Agent 发消息…（如：把输入框改宽一点）'}
+          rows={4}
+          style={styles.input}
+          disabled={busy}
+        />
+        <button onClick={() => void submit()} disabled={busy || !text.trim()} style={styles.btn}>
+          {busy ? '执行中' : '发送'}
+        </button>
+      </div>
     </div>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  bar: { display: 'flex', gap: 8, padding: 12, borderTop: '1px solid var(--border)' },
+  bar: { padding: 12, borderTop: '1px solid var(--border)' },
+  state: { display: 'flex', alignItems: 'center', gap: 6, minHeight: 20, marginBottom: 6, fontSize: 12 },
+  stateDot: { width: 7, height: 7, borderRadius: '50%', flexShrink: 0 },
+  controls: { display: 'flex', gap: 8 },
   input: {
     flex: 1,
     resize: 'none',

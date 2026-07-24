@@ -85,7 +85,7 @@ export const useChatStore = create<ChatState>((set) => ({
   pushAgentEvent: (event) =>
     set((s) => {
       if (event.type === 'done') {
-        return { ...s, isStreaming: false };
+        return { ...s, isStreaming: false, reloadKey: s.reloadKey + 1 };
       }
       if (event.type === 'session_init') {
         return { ...s, reloadKey: s.reloadKey + 1 }; // 不显示气泡，但刷新会话列表
