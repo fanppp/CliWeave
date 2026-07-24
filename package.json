@@ -1,0 +1,17 @@
+{
+  "name": "0agentteams",
+  "version": "0.1.0",
+  "private": true,
+  "description": "可配置多 CLI Agent 节点 + Graph 编排的协作平台",
+  "scripts": {
+    "dev": "pnpm -r --parallel run dev",
+    "build": "pnpm -r run build",
+    "lint": "pnpm -r run lint",
+    "dev:api": "pnpm --filter @0agentteams/api run dev",
+    "dev:web": "pnpm --filter @0agentteams/web run dev"
+  },
+  "packageManager": "pnpm@11.17.0",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
