@@ -16,8 +16,7 @@ import {
   writeNodeDescriptor,
 } from '../agents/NodeDescriptor.js';
 import { clearActiveSession, getActiveSession, setActiveSession } from '../agents/SessionChain.js';
-import { resolveCodexHome } from '../agents/codex-home.js';
-import { listCodexSessions, readCodexTranscript } from '../agents/providers/codex-transcript.js';
+import { listNodeSessions, readNodeTranscript } from '../agents/transcript-router.js';
 import { getProjectRoot } from '../utils/project-root.js';
 import { resolveGlob } from '../utils/glob.js';
 
@@ -67,10 +66,9 @@ const agentsRoutes: FastifyPluginCallback = (app, _options, done) => {
     } catch {
       return reply.code(404).send({ error: `node not found: ${id}` });
     }
-    // 直接读 codex 自己的会话 transcript（单一真相源 = CLI 记忆，存本项目）
+    // 直接读 CLI 自己的会话 transcript（单一真相源 = CLI 记忆，存本项目）
     const sessionId = getActiveSession(descriptor);
-    const codexHome = resolveCodexHome(descriptor);
-    const history = sessionId ? readCodexTranscript(sessionId, codexHome) : [];
+    const history = sessionId ? readNodeTranscript(descriptor, sessionId) : [];
     return { history, sessionId: sessionId ?? null };
   });
 
@@ -83,7 +81,7 @@ const agentsRoutes: FastifyPluginCallback = (app, _options, done) => {
       return reply.code(404).send({ error: `node not found: ${id}` });
     }
     const active = getActiveSession(descriptor);
-    return { activeSessionId: active ?? null, sessions: listCodexSessions(resolveCodexHome(descriptor)) };
+    return { activeSessionId: active ?? null, sessions: listNodeSessions(descriptor) };
   });
 
   app.post('/api/agents/:id/sessions/activate', async (request, reply) => {

@@ -4,6 +4,9 @@
  */
 import { registerProvider } from './AgentServiceFactory.js';
 import { CodexAgentService } from './providers/CodexAgentService.js';
+import { ClaudeAgentService } from './providers/ClaudeAgentService.js';
+import { OpenCodeAgentService } from './providers/OpenCodeAgentService.js';
+import { GeminiAgentService } from './providers/GeminiAgentService.js';
 
 let registered = false;
 
@@ -13,9 +16,7 @@ export function registerAllProviders(): void {
   registered = true;
 
   registerProvider('codex', (descriptor, compiledL0) => new CodexAgentService(descriptor, compiledL0));
-
-  // Phase 2:
-  // registerProvider('claude', (d, l0) => new ClaudeAgentService(d, l0));
-  // registerProvider('opencode', (d, l0) => new OpenCodeAgentService(d, l0));
-  // registerProvider('gemini', (d, l0) => new GeminiAgentService(d, l0));
+  registerProvider('claude', (descriptor, compiledL0) => new ClaudeAgentService(descriptor, compiledL0));
+  registerProvider('opencode', (descriptor, compiledL0) => new OpenCodeAgentService(descriptor, compiledL0));
+  registerProvider('gemini', (descriptor, compiledL0) => new GeminiAgentService(descriptor, compiledL0));
 }

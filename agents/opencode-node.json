@@ -1,0 +1,28 @@
+{
+  "id": "opencode-node",
+  "name": "OpenCode",
+  "provider": "opencode",
+  "cli": {
+    "command": "opencode",
+    "sandboxMode": "danger-full-access",
+    "extraArgs": [],
+    "promptVia": "argv",
+    "cwd": "${PROJECT_ROOT}"
+  },
+  "model": "",
+  "prompt": {
+    "identity": "agents/opencode-node/identity.md"
+  },
+  "rules": {
+    "files": ["agents/opencode-node/rules/*.md"]
+  },
+  "skills": {
+    "mcp": []
+  },
+  "memory": {
+    "session": {
+      "resume": true,
+      "dir": "agents/opencode-node/sessions"
+    }
+  }
+}

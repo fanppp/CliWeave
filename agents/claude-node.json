@@ -1,0 +1,29 @@
+{
+  "id": "claude-node",
+  "name": "Claude",
+  "provider": "claude",
+  "cli": {
+    "command": "claude",
+    "sandboxMode": "danger-full-access",
+    "extraArgs": [],
+    "promptVia": "stdin",
+    "cwd": "${PROJECT_ROOT}"
+  },
+  "model": "",
+  "prompt": {
+    "identity": "agents/claude-node/identity.md"
+  },
+  "rules": {
+    "files": ["agents/claude-node/rules/*.md"]
+  },
+  "skills": {
+    "mcp": []
+  },
+  "memory": {
+    "session": {
+      "resume": true,
+      "dir": "agents/claude-node/sessions"
+    },
+    "cliHome": "agents/claude-node/memory/.claude"
+  }
+}
