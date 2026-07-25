@@ -27,7 +27,7 @@ export function ChatInput() {
     <div style={styles.bar}>
       <div style={{ ...styles.state, color: busy ? 'var(--text-muted)' : 'var(--success)' }}>
         <span style={{ ...styles.stateDot, background: busy ? 'var(--accent)' : 'var(--success)' }} />
-        {busy ? 'Agent 执行中，请等待本次任务完成' : 'Agent 已就绪，可以发送任务'}
+        {busy ? 'CLI 正在执行，请稍候，本次回复完成前不能再次发送' : 'Agent 已就绪，可以发送任务'}
       </div>
       <div style={styles.controls}>
         <textarea
@@ -36,11 +36,15 @@ export function ChatInput() {
           onKeyDown={onKeyDown}
           placeholder={busy ? '当前任务完成后可继续输入' : '给 Agent 发消息…（如：把输入框改宽一点）'}
           rows={4}
-          style={styles.input}
+          style={{ ...styles.input, ...(busy ? styles.inputDisabled : {}) }}
           disabled={busy}
         />
-        <button onClick={() => void submit()} disabled={busy || !text.trim()} style={styles.btn}>
-          {busy ? '执行中' : '发送'}
+        <button
+          onClick={() => void submit()}
+          disabled={busy || !text.trim()}
+          style={{ ...styles.btn, ...((busy || !text.trim()) ? styles.btnDisabled : {}) }}
+        >
+          {busy ? '请稍候' : '发送'}
         </button>
       </div>
     </div>
@@ -63,6 +67,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 16,
     outline: 'none',
   },
+  inputDisabled: { cursor: 'not-allowed', opacity: 0.65 },
   btn: {
     background: 'var(--accent)',
     color: 'var(--accent-text)',
@@ -72,4 +77,5 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 14,
     fontWeight: 600,
   },
+  btnDisabled: { cursor: 'not-allowed', opacity: 0.55 },
 };

@@ -40,14 +40,14 @@ export function MessageStream() {
           </div>
         );
       })}
-      {isStreaming && <div style={styles.thinking}>Agent 思考中…</div>}
+      {isStreaming && <div style={styles.thinking}>CLI 正在执行，请稍候…</div>}
       <div ref={endRef} />
     </div>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  wrap: { flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 10 },
+  wrap: { flex: 1, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain', padding: 16, display: 'flex', flexDirection: 'column', gap: 10 },
   empty: { color: 'var(--text-faint)', textAlign: 'center', marginTop: 40 },
   bubble: { borderRadius: 8, padding: '10px 14px', maxWidth: '85%' },
   meta: { display: 'flex', justifyContent: 'space-between', fontSize: 11, opacity: 0.6, marginBottom: 4 },

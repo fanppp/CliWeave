@@ -203,7 +203,7 @@ export function NodeConfigPanel() {
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  wrap: { padding: 16, overflowY: 'auto', fontSize: 13, color: 'var(--text)' },
+  wrap: { height: '100%', minHeight: 0, padding: 16, overflowY: 'auto', overscrollBehavior: 'contain', fontSize: 13, color: 'var(--text)' },
   h: { margin: '0 0 12px', fontSize: 16, color: 'var(--text-strong)' },
   h2: { margin: '16px 0 8px', fontSize: 13, color: 'var(--text-muted)', textTransform: 'uppercase' },
   row: { display: 'flex', justifyContent: 'space-between', marginBottom: 4 },

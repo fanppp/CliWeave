@@ -60,6 +60,7 @@ interface ChatState {
   activeNodeId: string;
   reloadKey: number;
   setActiveNode: (id: string) => void;
+  hydrateActiveNode: () => void;
   addUser: (content: string) => void;
   pushAgentEvent: (event: AgentEvent) => void;
   loadHistory: (entries: HistoryEntry[]) => void;
@@ -70,13 +71,35 @@ interface ChatState {
 
 let seq = 0;
 const nextId = (): string => `m${Date.now()}_${seq++}`;
+const ACTIVE_NODE_KEY = '0agentteams.activeNodeKey';
+
+function persistActiveNode(id: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(ACTIVE_NODE_KEY, id);
+  } catch {
+    // Browser storage may be unavailable in private or restricted contexts.
+  }
+}
 
 export const useChatStore = create<ChatState>((set) => ({
   messages: [],
   isStreaming: false,
   activeNodeId: 'codex:codex-node',
   reloadKey: 0,
-  setActiveNode: (id) => set({ activeNodeId: id }),
+  setActiveNode: (id) => {
+    persistActiveNode(id);
+    set({ activeNodeId: id });
+  },
+  hydrateActiveNode: () => {
+    if (typeof window === 'undefined') return;
+    try {
+      const saved = window.localStorage.getItem(ACTIVE_NODE_KEY);
+      if (saved) set({ activeNodeId: saved });
+    } catch {
+      // Keep the default node when browser storage is unavailable.
+    }
+  },
   addUser: (content) =>
     set((s) => ({
       messages: [...s.messages, { id: nextId(), role: 'user', content, timestamp: Date.now() }],
@@ -88,7 +111,7 @@ export const useChatStore = create<ChatState>((set) => ({
         return { ...s, isStreaming: false, reloadKey: s.reloadKey + 1 };
       }
       if (event.type === 'session_init') {
-        return { ...s, reloadKey: s.reloadKey + 1 }; // 不显示气泡，但刷新会话列表
+        return s; // 不显示气泡；done 时统一刷新历史与会话列表。
       }
       const role: ChatMessage['role'] = event.type === 'error' ? 'system' : 'agent';
       let content = event.content ?? '';
@@ -109,10 +132,10 @@ export const useChatStore = create<ChatState>((set) => ({
       return { ...s, messages: [...s.messages, msg] };
     }),
   loadHistory: (entries) =>
-    set({
+    set((s) => ({
       messages: entries.map(entryToChatMessage),
-      isStreaming: false,
-    }),
+      isStreaming: s.isStreaming,
+    })),
   triggerReload: () => set((s) => ({ reloadKey: s.reloadKey + 1 })),
   setStreaming: (streaming) => set({ isStreaming: streaming }),
   clear: () => set({ messages: [], isStreaming: false }),

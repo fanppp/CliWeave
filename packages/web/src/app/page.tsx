@@ -90,7 +90,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 17,
     lineHeight: 1,
   },
-  body: { flex: 1, display: 'flex', overflow: 'hidden' },
-  chat: { flex: 1, display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)' },
-  side: { width: 380, flexShrink: 0, borderLeft: '1px solid var(--border)' },
+  body: { flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' },
+  chat: { flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)' },
+  side: { width: 380, minHeight: 0, flexShrink: 0, overflow: 'hidden', borderLeft: '1px solid var(--border)' },
 };

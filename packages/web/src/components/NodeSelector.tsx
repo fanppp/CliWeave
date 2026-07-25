@@ -16,6 +16,8 @@ interface NodeItem {
 export function NodeSelector() {
   const activeNodeId = useChatStore((s) => s.activeNodeId);
   const setActiveNode = useChatStore((s) => s.setActiveNode);
+  const hydrateActiveNode = useChatStore((s) => s.hydrateActiveNode);
+  const isStreaming = useChatStore((s) => s.isStreaming);
   const triggerReload = useChatStore((s) => s.triggerReload);
   const reloadKey = useChatStore((s) => s.reloadKey);
   const [nodes, setNodes] = useState<NodeItem[]>([]);
@@ -24,11 +26,22 @@ export function NodeSelector() {
   const refresh = (): void => {
     fetch(`${API_URL}/api/agents`)
       .then((r) => (r.ok ? r.json() : []))
-      .then((list: NodeItem[]) => setNodes(Array.isArray(list) ? list : []))
+      .then((list: NodeItem[]) => {
+        const nextNodes = Array.isArray(list) ? list : [];
+        setNodes(nextNodes);
+        const current = useChatStore.getState().activeNodeId;
+        if (nextNodes.length > 0 && !nextNodes.some((node) => node.nodeKey === current)) {
+          setActiveNode(nextNodes[0].nodeKey);
+          triggerReload();
+        }
+      })
       .catch(() => setNodes([]));
   };
 
-  useEffect(refresh, [reloadKey]);
+  useEffect(() => {
+    hydrateActiveNode();
+    refresh();
+  }, [reloadKey]);
 
   const switchNode = (id: string): void => {
     setActiveNode(id);
@@ -56,17 +69,22 @@ export function NodeSelector() {
 
   return (
     <div style={styles.wrap}>
-      <select style={styles.select} value={activeNodeId} onChange={(e) => switchNode(e.target.value)}>
+      <select
+        style={styles.select}
+        value={activeNodeId}
+        onChange={(e) => switchNode(e.target.value)}
+        disabled={isStreaming}
+      >
         {nodes.map((n) => (
           <option key={n.nodeKey} value={n.nodeKey}>
             {n.name} ({n.provider}/{n.localId})
           </option>
         ))}
       </select>
-      <button style={styles.addBtn} title='新建节点' onClick={() => setShowAdd(true)}>
+      <button style={styles.addBtn} title='新建节点' onClick={() => setShowAdd(true)} disabled={isStreaming}>
         + 新节点
       </button>
-      <button style={styles.delBtn} title='删除当前节点' onClick={() => void del(activeNodeId)}>
+      <button style={styles.delBtn} title='删除当前节点' onClick={() => void del(activeNodeId)} disabled={isStreaming}>
         ×
       </button>
       {showAdd && <AddNodeModal onClose={() => setShowAdd(false)} onCreated={onCreated} />}
