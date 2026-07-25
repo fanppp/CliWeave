@@ -56,6 +56,7 @@
 - [2026-07-24] 1.11 - 会话流控: messages 路由调用结束广播 done + 防并发发送 + ChatInput 忙闲状态指示 + chatStore done/session_init 后刷新历史/会话列表。git 初始化并提交(e36bd1e + 1ff353d)。
 - [2026-07-24] 2.1 - 多 provider 完成：新增 ClaudeAgentService(claude -p --output-format stream-json --verbose --dangerously-skip-permissions，项目内 CLAUDE_CONFIG_DIR + 凭证 copy-on-missing + claude-transcript 读 projects/\<hash\>/\<sid\>.jsonl，实测 hello+历史2条)、OpenCodeAgentService(opencode run --format json，位置参数 prompt，实测 sessionInit+hello)、GeminiAgentService(按 clowder-ai 文档 best-effort，gemini 未装待测)。transcript-router 按 provider 调度 read/list。注册表 registerAllProviders 注册四个。新增 claude-node + opencode-node 节点配置。加新 CLI = provider 类+事件转换+注册一行+可选 transcript reader。
 - [2026-07-24] 2.2 - web 加/删/选节点：POST /api/agents/:id 改为脚手架建目录+默认 identity/rules/sessions（按 provider 补默认 cliHome）+ isNew 检测；新增 DELETE /api/agents/:id（删 JSON+目录）；GET /api/agents/providers 返回四 provider 元数据(installed 标记)。web：NodeSelector(下拉切换节点+刷新历史)、AddNodeModal(选 provider+填 id/name/model→POST→切换)、删除按钮。实测：建 test-node 脚手架生成 identity/rules/sessions，DELETE 清除干净。
+- [2026-07-25] 2.2 改 - opencode 历史修复：opencode 会话存全局 SQLite(~/.local/share/opencode/opencode.db)非文件，故用 `opencode export <sid>` 子进程读 JSON→解析 messages[].info.role+parts[].text 成 HistoryEntry(剥 L0 前缀)。transcript-router 加 opencode case。实测 opencode-node 历史 count=6 全读出。注意：opencode 记忆不落项目(全局DB，CLI 本身限制)，active.json 仍记 sessionId；codex/claude 记忆在项目内。sessions 列表对 opencode 暂返回 [](opencode session list 格式待适配)。
 
 ## 差距评估（2026-07-24，对照最终目标）
 

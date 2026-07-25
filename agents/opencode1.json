@@ -1,0 +1,28 @@
+{
+  "id": "opencode1",
+  "name": "opencode1",
+  "provider": "opencode",
+  "cli": {
+    "command": "opencode",
+    "sandboxMode": "danger-full-access",
+    "extraArgs": [],
+    "promptVia": "stdin",
+    "cwd": "${PROJECT_ROOT}"
+  },
+  "model": "",
+  "prompt": {
+    "identity": "agents/opencode1/identity.md"
+  },
+  "rules": {
+    "files": [
+      "agents/opencode1/rules/*.md"
+    ]
+  },
+  "memory": {
+    "session": {
+      "resume": true,
+      "dir": "agents/opencode1/sessions"
+    },
+    "cliHome": "agents/opencode1/memory/.opencode"
+  }
+}
