@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 3,
+  "localId": "codex-node",
+  "name": "Codex",
+  "provider": "codex",
+  "cli": {
+    "command": "codex",
+    "sandboxMode": "danger-full-access",
+    "extraArgs": [],
+    "promptVia": "stdin",
+    "cwd": "${PROJECT_ROOT}"
+  },
+  "model": "",
+  "storage": {
+    "config": {
+      "identityFile": "agents/codex/codex-node/config/identity.md",
+      "rulesFiles": [
+        "agents/codex/codex-node/config/rules/*.md"
+      ]
+    },
+    "runtime": {
+      "activeSessionFile": "agents/codex/codex-node/runtime/active-session.json",
+      "resume": true
+    },
+    "data": {
+      "cliHome": "agents/codex/codex-node/data/cli/.codex"
+    }
+  },
+  "skills": {
+    "mcp": []
+  }
+}

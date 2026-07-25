@@ -1,6 +1,6 @@
 {
-  "schemaVersion": 2,
-  "id": "claude-node",
+  "schemaVersion": 3,
+  "localId": "claude-node",
   "name": "Claude",
   "provider": "claude",
   "cli": {
@@ -13,17 +13,17 @@
   "model": "",
   "storage": {
     "config": {
-      "identityFile": "agents/claude-node/config/identity.md",
+      "identityFile": "agents/claude/claude-node/config/identity.md",
       "rulesFiles": [
-        "agents/claude-node/config/rules/*.md"
+        "agents/claude/claude-node/config/rules/*.md"
       ]
     },
     "runtime": {
-      "activeSessionFile": "agents/claude-node/runtime/active-session.json",
+      "activeSessionFile": "agents/claude/claude-node/runtime/active-session.json",
       "resume": true
     },
     "data": {
-      "cliHome": "agents/claude-node/data/cli/.claude"
+      "cliHome": "agents/claude/claude-node/data/cli/.claude"
     }
   },
   "skills": {
