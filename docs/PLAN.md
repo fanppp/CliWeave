@@ -58,6 +58,32 @@
 - [2026-07-24] 2.2 - web 加/删/选节点：POST /api/agents/:id 改为脚手架建目录+默认 identity/rules/sessions（按 provider 补默认 cliHome）+ isNew 检测；新增 DELETE /api/agents/:id（删 JSON+目录）；GET /api/agents/providers 返回四 provider 元数据(installed 标记)。web：NodeSelector(下拉切换节点+刷新历史)、AddNodeModal(选 provider+填 id/name/model→POST→切换)、删除按钮。实测：建 test-node 脚手架生成 identity/rules/sessions，DELETE 清除干净。
 - [2026-07-25] 2.2 改 - opencode 历史修复：opencode 会话存全局 SQLite(~/.local/share/opencode/opencode.db)非文件，故用 `opencode export <sid>` 子进程读 JSON→解析 messages[].info.role+parts[].text 成 HistoryEntry(剥 L0 前缀)。transcript-router 加 opencode case。实测 opencode-node 历史 count=6 全读出。注意：opencode 记忆不落项目(全局DB，CLI 本身限制)，active.json 仍记 sessionId；codex/claude 记忆在项目内。sessions 列表对 opencode 暂返回 [](opencode session list 格式待适配)。
 
+## 🔴 未解决问题（2026-07-25）
+
+### opencode 经 API 调用失败
+- **症状**：POST /api/messages 到 opencode-node 返回 202，但后台 invoke 不产出 session_init（active.json 留空 `{}`），history count=0，messages 路由 catch 未触发（无错误日志）。
+- **已排除**：codex/claude 经同一 API + spawnCli(shell:true) 正常 → spawn 通路本身没坏；opencode 命令本身可用（手动 `opencode run --format json "say hi"` 带 XDG env 能返回 + 落项目 DB）。
+- **已尝试均失败**：位置参数 prompt / stdin prompt / L0 前置 / instructions 配置(OPENCODE_CONFIG，会卡死) / 唯一分隔符。其中 OPENCODE_CONFIG + permission 块会导致 opencode 120s 卡死。
+- **待查方向**：① spawnCli 对 opencode 的 env 合并({ ...process.env, XDG... })是否有问题；② opencode 在 shell:true(cmd.exe) 下与直接 PowerShell 调用行为差异；③ 加 spawnCli stderr 透传日志看 opencode 启动报错。codex/claude 已满足"记忆在项目"，opencode 暂搁置等专门排查。
+
+## 全部 Gap（对照最终目标：任意 CLI 节点 + 每节点 memory/skills/rules + web 加节点可拖动）
+
+| 维度 | 现状 | 状态 |
+|------|------|------|
+| codex provider（记忆/sessions/skills 全在项目） | CODEX_HOME 项目内 + transcript + resume | ✅ |
+| claude provider（记忆/sessions 在项目） | CLAUDE_CONFIG_DIR 项目内 + transcript + resume | ✅ |
+| opencode provider | XDG 重定向存储可落项目(手动验证)，但经 API invoke 失败 | 🔴 阻塞 |
+| gemini provider | 按 clowder-ai 文档实现，本机未装 | ⚠️ 待测 |
+| per-node rules/identity 注入 | codex/claude 走 L0(developer_instructions/append-system-prompt)；opencode instructions 配置会卡死 | ⚠️ opencode 待解 |
+| per-node skills/MCP 注入 | descriptor.skills.mcp 空，无注入 | ❌ Phase 3 |
+| web 加/删/选节点 | NodeSelector + AddNodeModal + DELETE + 脚手架 | ✅ |
+| Graph 画布（@xyflow/react 增删/连线/拖动） | 未装 react-flow，无画布 | ❌ 2.3 |
+| AgentRouter（读 graph.json 拓扑串/并行调度） | 单节点直连，无路由层 | ❌ 2.4 |
+| 节点间通信（A.done→B.prompt） | 无 | ❌ 2.4 |
+| worktree 隔离（每节点独立工作树） | 各节点共享项目根 cwd，无隔离 | ❌ Phase 3（clowder-ai 用 git worktree） |
+
+下一步优先级：① 修 opencode API invoke（当前阻塞）② Graph 画布 + 拖动 ③ AgentRouter 多节点调度 ④ per-node skills/MCP。
+
 ## 差距评估（2026-07-24，对照最终目标）
 
 最终目标：任意 CLI 节点（即插即用/即删即弃），可选哪个 CLI，每节点有 memory/skills/rules，web 上加节点并可拖动。

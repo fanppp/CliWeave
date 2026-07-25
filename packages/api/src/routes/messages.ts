@@ -58,6 +58,7 @@ const messagesRoutes: FastifyPluginCallback<MessagesRouteOptions> = (app, option
           socketManager.broadcast(msg, nodeId);
         }
       } catch (err) {
+        console.error('[messages] invoke error for', nodeId, ':', err);
         socketManager.broadcast(
           {
             type: 'error',

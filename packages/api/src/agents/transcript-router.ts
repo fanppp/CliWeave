@@ -8,6 +8,7 @@ import { resolveCodexHome } from './codex-home.js';
 import { listCodexSessions, readCodexTranscript } from './providers/codex-transcript.js';
 import { resolveClaudeHome } from './claude-home.js';
 import { listClaudeSessions, readClaudeTranscript } from './providers/claude-transcript.js';
+import { opencodeXdgEnv, resolveOpencodeHome } from './opencode-home.js';
 import { listOpencodeSessions, readOpencodeTranscript } from './providers/opencode-transcript.js';
 
 export interface SessionSummary {
@@ -23,8 +24,10 @@ export function readNodeTranscript(descriptor: NodeDescriptor, sessionId: string
       return readCodexTranscript(sessionId, resolveCodexHome(descriptor));
     case 'claude':
       return readClaudeTranscript(sessionId, resolveClaudeHome(descriptor));
-    case 'opencode':
-      return readOpencodeTranscript(sessionId, descriptor.cli.command);
+    case 'opencode': {
+      const xdg = opencodeXdgEnv(resolveOpencodeHome(descriptor));
+      return readOpencodeTranscript(sessionId, descriptor.cli.command, xdg);
+    }
     default:
       return [];
   }
@@ -36,8 +39,10 @@ export function listNodeSessions(descriptor: NodeDescriptor): SessionSummary[] {
       return listCodexSessions(resolveCodexHome(descriptor));
     case 'claude':
       return listClaudeSessions(resolveClaudeHome(descriptor));
-    case 'opencode':
-      return listOpencodeSessions(descriptor.cli.command);
+    case 'opencode': {
+      const xdg = opencodeXdgEnv(resolveOpencodeHome(descriptor));
+      return listOpencodeSessions(descriptor.cli.command, xdg);
+    }
     default:
       return [];
   }

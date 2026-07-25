@@ -10,6 +10,7 @@ import type { CliSpawnOptions } from '../../utils/cli-types.js';
 import type { AgentService, AgentServiceOptions } from '../AgentService.js';
 import type { AgentMessage, MessageMetadata, NodeId } from '../types.js';
 import type { NodeDescriptor } from '../NodeDescriptor.js';
+import { ensureOpencodeHome, opencodeXdgEnv, resolveOpencodeHome } from '../opencode-home.js';
 import { transformOpenCodeEvent } from './opencode-event-transform.js';
 
 export class OpenCodeAgentService implements AgentService {
@@ -30,8 +31,9 @@ export class OpenCodeAgentService implements AgentService {
     const sessionId = options?.sessionId;
     const cwd = options?.workingDirectory ?? this.descriptor.cli.cwd;
 
-    // L0 前置到 prompt（opencode 无独立 system-prompt flag，走 AGENTS.md/前置）
-    const effectivePrompt = this.compiledL0 ? `${this.compiledL0}\n\n---\n\n${prompt}` : prompt;
+    // per-node 项目内 opencode home（经 XDG 重定向，DB/sessions/skills 全落项目）
+    const opencodeHome = resolveOpencodeHome(this.descriptor);
+    ensureOpencodeHome(opencodeHome);
 
     const args: string[] = [
       'run',
@@ -40,14 +42,14 @@ export class OpenCodeAgentService implements AgentService {
       ...(model ? ['-m', model] : []),
       ...(sessionId ? ['-s', sessionId] : []),
       ...this.descriptor.cli.extraArgs,
-      effectivePrompt, // 位置参数
     ];
 
     const spawnOpts: CliSpawnOptions = {
       command: this.descriptor.cli.command,
       args,
       cwd,
-      env: {},
+      stdinInput: prompt,
+      env: opencodeXdgEnv(opencodeHome),
       ...(options?.signal ? { signal: options.signal } : {}),
       ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
     };

@@ -25,14 +25,15 @@ function stripL0Prefix(text: string): string {
   return text.trim();
 }
 
-/** 调 opencode export 读会话 JSON */
-function exportSession(sessionId: string, command = 'opencode'): OpencodeMessage[] | null {
+/** 调 opencode export 读会话 JSON（带 XDG env 以读项目内 DB） */
+function exportSession(sessionId: string, command = 'opencode', xdgEnv: Record<string, string> = {}): OpencodeMessage[] | null {
   let result: ReturnType<typeof spawnSync>;
   try {
     result = spawnSync(command, ['export', sessionId], {
       encoding: 'utf-8',
       shell: process.platform === 'win32',
       timeout: 15_000,
+      env: { ...process.env, ...xdgEnv },
     });
   } catch {
     return null;
@@ -46,8 +47,8 @@ function exportSession(sessionId: string, command = 'opencode'): OpencodeMessage
   }
 }
 
-export function readOpencodeTranscript(sessionId: string, command = 'opencode'): HistoryEntry[] {
-  const messages = exportSession(sessionId, command);
+export function readOpencodeTranscript(sessionId: string, command = 'opencode', xdgEnv: Record<string, string> = {}): HistoryEntry[] {
+  const messages = exportSession(sessionId, command, xdgEnv);
   if (!messages) return [];
   const entries: HistoryEntry[] = [];
   for (const msg of messages) {
@@ -84,11 +85,11 @@ export interface SessionSummary {
   messageCount: number;
 }
 
-/** opencode 会话列表：用 `opencode session list`（若支持 JSON） */
-export function listOpencodeSessions(command = 'opencode'): SessionSummary[] {
+/** opencode 会话列表：用 `opencode session list`（若支持 JSON，带 XDG env） */
+export function listOpencodeSessions(command = 'opencode', xdgEnv: Record<string, string> = {}): SessionSummary[] {
   let result: ReturnType<typeof spawnSync>;
   try {
-    result = spawnSync(command, ['session', 'list'], { encoding: 'utf-8', shell: process.platform === 'win32', timeout: 10_000 });
+    result = spawnSync(command, ['session', 'list'], { encoding: 'utf-8', shell: process.platform === 'win32', timeout: 10_000, env: { ...process.env, ...xdgEnv } });
   } catch {
     return [];
   }
