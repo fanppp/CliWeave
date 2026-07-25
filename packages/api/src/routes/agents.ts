@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { FastifyPluginCallback } from 'fastify';
 import {
   formatNodeKey,
@@ -228,6 +228,29 @@ const agentsRoutes: FastifyPluginCallback = (app, _options, done) => {
     mkdirSync(dirname(full), { recursive: true });
     writeFileSync(full, content, 'utf-8');
     return { status: 'ok' };
+  });
+
+  app.put('/api/agents/:nodeKey/rules', async (request, reply) => {
+    const { nodeKey } = request.params as { nodeKey: string };
+    const { file, content } = (request.body ?? {}) as { file?: string; content?: string };
+    if (typeof file !== 'string' || !file.trim()) return reply.code(400).send({ error: 'file required' });
+    if (typeof content !== 'string') return reply.code(400).send({ error: 'content required' });
+    const descriptor = findDescriptor(nodeKey);
+    if (!descriptor) return reply.code(404).send({ error: `node not found: ${nodeKey}` });
+    const root = getProjectRoot();
+    const configRoot = dirname(resolve(root, descriptor.storage.config.identityFile));
+    const rulesRoot = join(configRoot, 'rules');
+    const target = resolve(root, file);
+    const rel = relative(rulesRoot, target);
+    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+      return reply.code(400).send({ error: 'file must be inside this node\'s config/rules directory' });
+    }
+    if (!target.toLowerCase().endsWith('.md')) {
+      return reply.code(400).send({ error: 'only .md files are allowed' });
+    }
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, content, 'utf-8');
+    return { status: 'ok', file: relative(root, target).replace(/\\/g, '/') };
   });
 
   done();
