@@ -13,7 +13,10 @@ export function useSocket(): { connected: boolean } {
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    const socket = io(API_URL, { transports: ['websocket', 'polling'] });
+    const socket = io(API_URL, {
+      transports: ['websocket', 'polling'],
+      autoConnect: false,
+    });
     socketRef.current = socket;
 
     socket.on('connect', () => {
@@ -25,8 +28,15 @@ export function useSocket(): { connected: boolean } {
       pushAgentEvent(msg);
     });
 
+    // React Strict Mode mounts, cleans up, then mounts again in development.
+    // Deferring connect prevents the discarded mount from opening a WebSocket.
+    const connectTimer = window.setTimeout(() => socket.connect(), 0);
+
     return () => {
+      window.clearTimeout(connectTimer);
+      socket.removeAllListeners();
       socket.disconnect();
+      if (socketRef.current === socket) socketRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
