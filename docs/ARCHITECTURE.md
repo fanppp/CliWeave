@@ -7,8 +7,8 @@
 ## 大局观
 
 以"**配置驱动的 Agent 节点**"为核心。每个节点是一份数据
-（`agents/<id>.json`），不是硬编码 service。加任意 CLI = 加 1 个
-provider 类 + 1 个 JSON 文件，零改路由 / UI。Agent 能写 JSON 给自己加邻居
+（`agents/<provider>/<local-id>/node.json`），不是硬编码 service。加任意 CLI = 加 1 个
+provider 类 + 1 份节点描述，零改路由 / UI。节点以 `provider:localId` 唯一标识
 （元能力）。
 
 ## 五大核心抽象
@@ -16,7 +16,7 @@ provider 类 + 1 个 JSON 文件，零改路由 / UI。Agent 能写 JSON 给自�
 | 需求 | 抽象 | 借鉴 clowder-ai |
 |------|------|----------------|
 | 任意 CLI 是节点 | `AgentService.invoke(prompt,opts): AsyncIterable<AgentMessage>` | `domains/cats/services/types.ts` |
-| 节点配置 | `NodeDescriptor` (`agents/*.json`) | `cat-catalog.json` |
+| 节点配置 | `NodeDescriptor` (`agents/<provider>/<local-id>/node.json`) | `cat-catalog.json` |
 | per-node prompt/rules | `L0Injector`（identity+rules → developer_instructions / system prompt） | `l0-compiler` + `compileDeveloperInstructionsArgs` |
 | per-node skills | 能力注册表（`descriptor.skills` → MCP 注入）〔Phase 3〕 | `buildCatCafeMcpArgs` |
 | per-node storage | `config/runtime/data` + `SessionChain`（resume） | `SessionChainStore` + `--resume` |
@@ -27,13 +27,12 @@ provider 类 + 1 个 JSON 文件，零改路由 / UI。Agent 能写 JSON 给自�
 ```
 0AgentTeams/
 ├── agents/                      节点配置 = 数据（codex 可自改/自增）
-│   ├── codex-node.json          NodeDescriptor
-│   ├── codex-node/
-│   │   ├── config/              可版本控制的节点配置
-│   │   │   ├── identity.md      该节点人设（L0 prompt）
-│   │   │   └── rules/*.md       该节点规则
-│   │   ├── runtime/             平台运行状态（Git ignore）
-│   │   └── data/cli/            CLI 原生 home（Git ignore）
+│   ├── codex/
+│   │   └── codex-node/
+│   │       ├── node.json        NodeDescriptor (schema v3)
+│   │       ├── config/          可版本控制的节点配置
+│   │       ├── runtime/         平台运行状态（Git ignore）
+│   │       └── data/cli/        CLI 原生 home（Git ignore）
 │   └── graph.json               显式静态图（边 from→to）〔Phase 2〕
 ├── shared/                       共享数据保留根（尚未启用）
 │   ├── project/                  项目级 scope
@@ -44,12 +43,12 @@ provider 类 + 1 个 JSON 文件，零改路由 / UI。Agent 能写 JSON 给自�
 └── docs/
 ```
 
-## NodeDescriptor schema (`agents/<id>.json`)
+## NodeDescriptor schema (`agents/<provider>/<local-id>/node.json`)
 
 ```jsonc
 {
-  "schemaVersion": 2,
-  "id": "codex-node",
+  "schemaVersion": 3,
+  "localId": "codex-node",
   "name": "Codex",
   "provider": "codex",              // 选哪个 AgentService 实现
   "cli": {
@@ -62,14 +61,14 @@ provider 类 + 1 个 JSON 文件，零改路由 / UI。Agent 能写 JSON 给自�
   "skills":  { "mcp": [] },        // Phase 3
   "storage": {
     "config": {
-      "identityFile": "agents/codex-node/config/identity.md",
-      "rulesFiles": ["agents/codex-node/config/rules/*.md"]
+      "identityFile": "agents/codex/codex-node/config/identity.md",
+      "rulesFiles": ["agents/codex/codex-node/config/rules/*.md"]
     },
     "runtime": {
-      "activeSessionFile": "agents/codex-node/runtime/active-session.json",
+      "activeSessionFile": "agents/codex/codex-node/runtime/active-session.json",
       "resume": true
     },
-    "data": { "cliHome": "agents/codex-node/data/cli/.codex" }
+    "data": { "cliHome": "agents/codex/codex-node/data/cli/.codex" }
   }
 }
 ```
@@ -77,8 +76,8 @@ provider 类 + 1 个 JSON 文件，零改路由 / UI。Agent 能写 JSON 给自�
 ## 数据流（Phase 1 单节点路径）
 
 ```
-Web input@codex-node ─POST /api/messages {content,nodeId}─▶ API
-  → NodeDescriptor 读 agents/codex-node.json
+Web input@codex:codex-node ─POST /api/messages {content,nodeId}─▶ API
+  → NodeDescriptor 读 agents/codex/codex-node/node.json
   → AgentServiceFactory.build() = L0Inject(identity+rules) + SessionChain.resume
   → CodexAgentService.invoke(prompt)
        (cwd=项目根, --sandbox danger-full-access, prompt 经 stdin)
@@ -90,7 +89,7 @@ Web input@codex-node ─POST /api/messages {content,nodeId}─▶ API
 **自修改闭环**：codex 子进程 `cwd=项目根` + `--sandbox danger-full-access`，
 能读写 web/api 自己的源码。用户输入"把输入框改宽"→ codex 编辑
 `ChatInput.tsx` → Next HMR 即时生效。codex 编辑
-`agents/codex-node/config/rules/*.md` → 下次该节点 `L0Injector` 读到新规则 → 行为改变。
+`agents/codex/codex-node/config/rules/*.md` → 下次该节点 `L0Injector` 读到新规则 → 行为改变。
 
 ## 技术栈
 
@@ -102,7 +101,7 @@ Web input@codex-node ─POST /api/messages {content,nodeId}─▶ API
 
 ## per-node 记忆全部存在本项目里
 
-已安装的 Codex、Claude、OpenCode 分别通过 `CODEX_HOME`、`CLAUDE_CONFIG_DIR` 和完整 XDG 环境把原生会话隔离到 `agents/<node>/data/cli/`。平台活动会话指针位于 `runtime/active-session.json`；显示、列表和 resume 都直接使用 CLI 原生 transcript/数据库，保持单一真相源。
+已安装的 Codex、Claude、OpenCode 分别通过 `CODEX_HOME`、`CLAUDE_CONFIG_DIR` 和完整 XDG 环境把原生会话隔离到 `agents/<provider>/<local-id>/data/cli/`。平台活动会话指针位于 `runtime/active-session.json`；显示、列表和 resume 都直接使用 CLI 原生 transcript/数据库，保持单一真相源。
 
 共享数据未来位于独立的 `shared/project` 与 `shared/teams/<team-id>` scope，只共享知识和产物，不共享节点原生会话。当前仅保留路径契约，不创建目录或开放读写。
 

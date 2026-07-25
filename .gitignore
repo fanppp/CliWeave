@@ -9,6 +9,10 @@ dist/
 *.tsbuildinfo
 
 # Per-node platform runtime and provider-native CLI homes stay local.
+agents/*/*/runtime/
+agents/*/*/data/cli/
+
+# Flat v2 nodes may remain temporarily while a Windows process holds a lock.
 agents/*/runtime/
 agents/*/data/cli/
 

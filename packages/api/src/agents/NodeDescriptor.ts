@@ -1,23 +1,23 @@
-/** Node configuration stored in agents/<id>.json. */
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  writeFileSync,
-} from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+/** Provider-scoped node descriptors stored at agents/<provider>/<localId>/node.json. */
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { getProjectRoot, resolvePathVars } from '../utils/project-root.js';
-import { migrateLegacyNodeLayout, normalizeLockedLegacyDescriptor } from './node-storage-migration.js';
+import {
+  migrateFlatNodeHierarchy,
+  migrateLegacyNodeLayout,
+  normalizeLockedFlatDescriptor,
+} from './node-storage-migration.js';
+
+const ProviderIdSchema = z.string().regex(/^[a-z0-9][a-z0-9._-]*$/, 'invalid provider id');
+const LocalIdSchema = z.string().regex(/^[a-z0-9][a-z0-9_-]*$/, 'invalid local node id');
 
 export const NodeDescriptorSchema = z.object({
-  schemaVersion: z.literal(2),
+  schemaVersion: z.literal(3),
   migrationPending: z.boolean().optional(),
-  id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'invalid node id'),
-  name: z.string(),
-  provider: z.string(),
+  localId: LocalIdSchema,
+  name: z.string().trim().min(1),
+  provider: ProviderIdSchema,
   cli: z.object({
     command: z.string(),
     sandboxMode: z.string().default('danger-full-access'),
@@ -35,21 +35,46 @@ export const NodeDescriptorSchema = z.object({
       activeSessionFile: z.string(),
       resume: z.boolean().default(true),
     }),
-    data: z.object({
-      cliHome: z.string().optional(),
-    }),
+    data: z.object({ cliHome: z.string().optional() }),
   }),
   skills: z.object({ mcp: z.array(z.record(z.unknown())).default([]) }).optional(),
 });
 
 export type NodeDescriptor = z.infer<typeof NodeDescriptorSchema>;
 
+export interface ParsedNodeKey {
+  provider: string;
+  localId: string;
+}
+
+export function formatNodeKey(provider: string, localId: string): string {
+  return `${ProviderIdSchema.parse(provider)}:${LocalIdSchema.parse(localId)}`;
+}
+
+export function parseNodeKey(nodeKey: string): ParsedNodeKey {
+  const separator = nodeKey.indexOf(':');
+  if (separator <= 0 || separator !== nodeKey.lastIndexOf(':')) throw new Error(`Invalid node key: ${nodeKey}`);
+  return {
+    provider: ProviderIdSchema.parse(nodeKey.slice(0, separator)),
+    localId: LocalIdSchema.parse(nodeKey.slice(separator + 1)),
+  };
+}
+
+export function nodeKeyOf(descriptor: NodeDescriptor): string {
+  return formatNodeKey(descriptor.provider, descriptor.localId);
+}
+
 function agentsDir(): string {
   return join(getProjectRoot(), 'agents');
 }
 
-function descriptorFile(id: string): string {
-  return join(agentsDir(), `${id}.json`);
+export function nodeRoot(descriptor: Pick<NodeDescriptor, 'provider' | 'localId'>): string {
+  return join(agentsDir(), descriptor.provider, descriptor.localId);
+}
+
+function descriptorFile(nodeKey: string): string {
+  const { provider, localId } = parseNodeKey(nodeKey);
+  return join(agentsDir(), provider, localId, 'node.json');
 }
 
 function assertInside(label: string, root: string, path: string): void {
@@ -60,96 +85,103 @@ function assertInside(label: string, root: string, path: string): void {
 }
 
 export function assertNodeStorageOwnership(descriptor: NodeDescriptor): void {
-  const nodeRoot = resolve(getProjectRoot(), 'agents', descriptor.id);
+  const root = descriptor.migrationPending
+    ? join(agentsDir(), descriptor.localId)
+    : nodeRoot(descriptor);
   if (descriptor.migrationPending) {
-    assertInside('identityFile', nodeRoot, descriptor.storage.config.identityFile);
-    for (const file of descriptor.storage.config.rulesFiles) assertInside('rulesFiles', nodeRoot, file);
-    assertInside('activeSessionFile', nodeRoot, descriptor.storage.runtime.activeSessionFile);
-    if (descriptor.storage.data.cliHome) assertInside('cliHome', nodeRoot, descriptor.storage.data.cliHome);
+    assertInside('identityFile', root, descriptor.storage.config.identityFile);
+    for (const file of descriptor.storage.config.rulesFiles) assertInside('rulesFiles', root, file);
+    assertInside('activeSessionFile', root, descriptor.storage.runtime.activeSessionFile);
+    if (descriptor.storage.data.cliHome) assertInside('cliHome', root, descriptor.storage.data.cliHome);
     return;
   }
-  const configRoot = join(nodeRoot, 'config');
-  const runtimeRoot = join(nodeRoot, 'runtime');
-  const cliRoot = join(nodeRoot, 'data', 'cli');
-  assertInside('identityFile', configRoot, descriptor.storage.config.identityFile);
-  for (const file of descriptor.storage.config.rulesFiles) assertInside('rulesFiles', configRoot, file);
-  assertInside('activeSessionFile', runtimeRoot, descriptor.storage.runtime.activeSessionFile);
-  if (descriptor.storage.data.cliHome) assertInside('cliHome', cliRoot, descriptor.storage.data.cliHome);
+  assertInside('identityFile', join(root, 'config'), descriptor.storage.config.identityFile);
+  for (const file of descriptor.storage.config.rulesFiles) assertInside('rulesFiles', join(root, 'config'), file);
+  assertInside('activeSessionFile', join(root, 'runtime'), descriptor.storage.runtime.activeSessionFile);
+  if (descriptor.storage.data.cliHome) assertInside('cliHome', join(root, 'data', 'cli'), descriptor.storage.data.cliHome);
 }
 
-function parseDescriptor(id: string, raw: unknown): NodeDescriptor {
+function parseDescriptor(nodeKey: string, raw: unknown): NodeDescriptor {
   const descriptor = NodeDescriptorSchema.parse(raw);
-  if (descriptor.id !== id) {
-    throw new Error(`Node descriptor id mismatch: expected ${id}, got ${descriptor.id}`);
+  if (nodeKeyOf(descriptor) !== nodeKey) {
+    throw new Error(`Node descriptor key mismatch: expected ${nodeKey}, got ${nodeKeyOf(descriptor)}`);
   }
   assertNodeStorageOwnership(descriptor);
   return descriptor;
 }
 
-/** Read a v2 descriptor. Startup migration runs before application routes are registered. */
-export function readNodeDescriptor(id: string): NodeDescriptor {
-  const filePath = descriptorFile(id);
-  if (!existsSync(filePath)) throw new Error(`Node descriptor not found: ${filePath}`);
-  const raw: unknown = JSON.parse(readFileSync(filePath, 'utf-8'));
-  const parsed = NodeDescriptorSchema.safeParse(raw);
-  if (parsed.success) return parseDescriptor(id, parsed.data);
+/** Read a node, retrying flat-layout migration when necessary. */
+export function readNodeDescriptor(nodeKey: string): NodeDescriptor {
+  const key = parseNodeKey(nodeKey);
+  const filePath = descriptorFile(nodeKey);
+  if (existsSync(filePath)) return parseDescriptor(nodeKey, JSON.parse(readFileSync(filePath, 'utf-8')) as unknown);
+
+  const flatFile = join(agentsDir(), `${key.localId}.json`);
+  if (!existsSync(flatFile)) throw new Error(`Node descriptor not found: ${filePath}`);
+  const raw: unknown = JSON.parse(readFileSync(flatFile, 'utf-8'));
+  if ((raw as { provider?: unknown }).provider !== key.provider) throw new Error(`Node descriptor not found: ${nodeKey}`);
   try {
-    return parseDescriptor(id, migrateLegacyNodeLayout(id, raw));
+    const v2 = migrateLegacyNodeLayout(key.localId, raw);
+    return parseDescriptor(nodeKey, migrateFlatNodeHierarchy(key.localId, v2));
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== 'EPERM' && code !== 'EBUSY') throw error;
-    console.warn(`[storage] node ${id} is using its legacy CLI home; migration will retry later`);
-    return parseDescriptor(id, normalizeLockedLegacyDescriptor(id, raw));
+    console.warn(`[storage] node ${nodeKey} is using its flat CLI home; migration will retry later`);
+    return parseDescriptor(nodeKey, normalizeLockedFlatDescriptor(key.localId, raw));
   }
 }
 
-/** Atomically write a validated descriptor. */
-export function writeNodeDescriptor(id: string, descriptor: NodeDescriptor): void {
-  const parsed = NodeDescriptorSchema.parse(descriptor);
-  if (parsed.id !== id) throw new Error(`Node descriptor id mismatch: expected ${id}, got ${parsed.id}`);
-  assertNodeStorageOwnership(parsed);
-  const dir = agentsDir();
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const filePath = descriptorFile(id);
+export function writeNodeDescriptor(nodeKey: string, descriptor: NodeDescriptor): void {
+  const parsed = parseDescriptor(nodeKey, descriptor);
+  const filePath = descriptorFile(nodeKey);
+  mkdirSync(dirname(filePath), { recursive: true });
   const tempPath = `${filePath}.tmp`;
   writeFileSync(tempPath, `${JSON.stringify(parsed, null, 2)}\n`, 'utf-8');
   renameSync(tempPath, filePath);
 }
 
-/** List v2 descriptors. */
 export function listNodeDescriptors(): NodeDescriptor[] {
-  const dir = agentsDir();
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .filter((file) => file.endsWith('.json') && file !== 'graph.json')
-    .flatMap((file) => {
+  const descriptors = new Map<string, NodeDescriptor>();
+  const root = agentsDir();
+  if (!existsSync(root)) return [];
+
+  for (const provider of readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
+    const providerDir = join(root, provider.name);
+    for (const node of readdirSync(providerDir, { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
+      const file = join(providerDir, node.name, 'node.json');
+      if (!existsSync(file)) continue;
+      const nodeKey = `${provider.name}:${node.name}`;
       try {
-        return [readNodeDescriptor(file.slice(0, -'.json'.length))];
+        descriptors.set(nodeKey, parseDescriptor(nodeKey, JSON.parse(readFileSync(file, 'utf-8')) as unknown));
       } catch (error) {
-        console.error(`[storage] node unavailable: ${file}:`, error);
-        return [];
+        console.error(`[storage] node unavailable: ${nodeKey}:`, error);
       }
-    });
+    }
+  }
+
+  for (const file of readdirSync(root).filter((name) => name.endsWith('.json') && name !== 'graph.json')) {
+    const localId = file.slice(0, -'.json'.length);
+    try {
+      const raw = JSON.parse(readFileSync(join(root, file), 'utf-8')) as { provider?: unknown };
+      if (typeof raw.provider !== 'string') continue;
+      const nodeKey = formatNodeKey(raw.provider, localId);
+      if (!descriptors.has(nodeKey)) descriptors.set(nodeKey, readNodeDescriptor(nodeKey));
+    } catch (error) {
+      console.error(`[storage] flat node unavailable: ${file}:`, error);
+    }
+  }
+  return [...descriptors.values()];
 }
 
-/** Run startup migration for every descriptor. */
 export function migrateAllNodeStorageLayouts(): string[] {
-  const dir = agentsDir();
-  if (!existsSync(dir)) return [];
   const failures: string[] = [];
-  for (const file of readdirSync(dir).filter((name) => name.endsWith('.json') && name !== 'graph.json')) {
-    const id = file.slice(0, -'.json'.length);
-    try {
-      const raw: unknown = JSON.parse(readFileSync(join(dir, file), 'utf-8'));
-      parseDescriptor(id, migrateLegacyNodeLayout(id, raw));
-    } catch (error) {
-      failures.push(`${id}: ${error instanceof Error ? error.message : String(error)}`);
-    }
+  listNodeDescriptors();
+  for (const file of readdirSync(agentsDir()).filter((name) => name.endsWith('.json') && name !== 'graph.json')) {
+    if (existsSync(join(agentsDir(), file))) failures.push(`${file}: migration deferred`);
   }
   return failures;
 }
 
-/** Resolve path variables without changing the descriptor's storage ownership. */
 export function resolveDescriptorPaths(descriptor: NodeDescriptor): NodeDescriptor {
   return {
     ...descriptor,
@@ -163,11 +195,9 @@ export function resolveDescriptorPaths(descriptor: NodeDescriptor): NodeDescript
         ...descriptor.storage.runtime,
         activeSessionFile: resolvePathVars(descriptor.storage.runtime.activeSessionFile),
       },
-      data: {
-        ...(descriptor.storage.data.cliHome
-          ? { cliHome: resolvePathVars(descriptor.storage.data.cliHome) }
-          : {}),
-      },
+      data: descriptor.storage.data.cliHome
+        ? { cliHome: resolvePathVars(descriptor.storage.data.cliHome) }
+        : {},
     },
   };
 }

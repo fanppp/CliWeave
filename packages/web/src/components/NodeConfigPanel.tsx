@@ -4,7 +4,8 @@ import { useEffect, useState } from 'react';
 import { useChatStore } from '../stores/chatStore';
 
 interface NodeDetail {
-  descriptor: { id: string; name: string; provider: string; model: string; cli: Record<string, unknown> };
+  nodeKey: string;
+  descriptor: { localId: string; name: string; provider: string; model?: string; cli: Record<string, unknown> };
   identity?: string;
   rules: { file: string; content: string }[];
 }
@@ -14,7 +15,8 @@ export function NodeConfigPanel() {
   const [detail, setDetail] = useState<NodeDetail | null>(null);
 
   useEffect(() => {
-    fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/agents/${activeNodeId}`)
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3004';
+    fetch(`${apiUrl}/api/agents/${encodeURIComponent(activeNodeId)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => setDetail(d))
       .catch(() => setDetail(null));
@@ -26,8 +28,12 @@ export function NodeConfigPanel() {
     <div style={styles.wrap}>
       <h3 style={styles.h}>{detail.descriptor.name}</h3>
       <div style={styles.row}>
-        <span>id</span>
-        <code>{detail.descriptor.id}</code>
+        <span>nodeKey</span>
+        <code>{detail.nodeKey}</code>
+      </div>
+      <div style={styles.row}>
+        <span>localId</span>
+        <code>{detail.descriptor.localId}</code>
       </div>
       <div style={styles.row}>
         <span>provider</span>

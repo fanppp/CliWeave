@@ -13,7 +13,7 @@ export function useNodeHistory(): void {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${API_URL}/api/agents/${activeNodeId}/history`)
+    fetch(`${API_URL}/api/agents/${encodeURIComponent(activeNodeId)}/history`)
       .then((r) => (r.ok ? r.json() : { history: [] }))
       .then((d) => {
         if (!cancelled && Array.isArray(d.history)) {

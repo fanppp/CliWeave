@@ -60,6 +60,7 @@
 - [2026-07-25] 2.2 改 - opencode 历史读取改为对项目内 XDG SQLite 调用 `opencode export <sid>`；`active.json` 只保存 sessionId。会话列表使用 `opencode session list --format json`，不再把默认 table 输出误当 JSON。
 - [2026-07-25] 2.2 存储闭环 - Codex/Claude/OpenCode 的 CLI home 增加节点目录越界保护，三者的 tmp 均落节点 memory；OpenCode 补齐 XDG_STATE_HOME。增加只复制的 dry-run/apply 迁移工具。Gemini 未安装，仅保留 stub 并由 `docs/CLI_STORAGE.md` 约束后续接入。
 - [2026-07-25] 节点存储 v2 - 节点统一为 `config/`、`runtime/`、`data/cli/`，启动时自动迁移旧布局；共享数据预留 `shared/project` 和 `shared/teams/<team-id>` 两级 scope，但暂不启用读写。
+- [2026-07-25] 节点存储 v3 - 节点按 `agents/<provider>/<local-id>/` 分类，canonical key 为 `provider:localId`；同 provider 下 localId 与显示名唯一，POST 只创建且冲突返回 409，provider/localId 创建后不可修改。v2 扁平节点自动迁移，Windows 锁定时继续兼容并延后重试。
 - [2026-07-25] 2.2 Windows 进程修复 - OpenCode 不再经 `shell:true`/npm cmd shim 启动，改为解析并直接 spawn 原生 `opencode.exe`，修复 cmd 提前 code 1、原生进程残留和 snapshot index.lock 冲突。
 
 ## 已解决问题（2026-07-25）

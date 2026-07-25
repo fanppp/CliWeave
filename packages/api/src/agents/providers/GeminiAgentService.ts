@@ -9,7 +9,7 @@ import { spawnCli, isCliError, isCliTimeout } from '../../utils/cli-spawn.js';
 import type { CliSpawnOptions } from '../../utils/cli-types.js';
 import type { AgentService, AgentServiceOptions } from '../AgentService.js';
 import type { AgentMessage, MessageMetadata, NodeId } from '../types.js';
-import type { NodeDescriptor } from '../NodeDescriptor.js';
+import { nodeKeyOf, type NodeDescriptor } from '../NodeDescriptor.js';
 import { transformGeminiEvent } from './gemini-event-transform.js';
 
 export class GeminiAgentService implements AgentService {
@@ -21,7 +21,7 @@ export class GeminiAgentService implements AgentService {
   constructor(descriptor: NodeDescriptor, compiledL0: string | undefined) {
     this.descriptor = descriptor;
     this.compiledL0 = compiledL0;
-    this.nodeId = descriptor.id;
+    this.nodeId = nodeKeyOf(descriptor);
   }
 
   async *invoke(prompt: string, options?: AgentServiceOptions): AsyncIterable<AgentMessage> {

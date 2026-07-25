@@ -5,23 +5,28 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { nodeTempEnv, resolveNodeCliHome } from './cli-storage.js';
 import { resolveSharedStorageRoot } from './node-storage-migration.js';
-import { assertNodeStorageOwnership, type NodeDescriptor } from './NodeDescriptor.js';
+import {
+  assertNodeStorageOwnership,
+  formatNodeKey,
+  parseNodeKey,
+  type NodeDescriptor,
+} from './NodeDescriptor.js';
 import { writeOpencodeConfig } from './opencode-home.js';
 
 function descriptor(cliHome?: string): NodeDescriptor {
   return {
-    schemaVersion: 2,
-    id: 'storage-test',
+    schemaVersion: 3,
+    localId: 'storage-test',
     name: 'storage-test',
     provider: 'opencode',
     cli: { command: 'opencode', sandboxMode: 'danger-full-access', extraArgs: [], promptVia: 'stdin', cwd: '${PROJECT_ROOT}' },
     storage: {
       config: {
-        identityFile: 'agents/storage-test/config/identity.md',
-        rulesFiles: ['agents/storage-test/config/rules/*.md'],
+        identityFile: 'agents/opencode/storage-test/config/identity.md',
+        rulesFiles: ['agents/opencode/storage-test/config/rules/*.md'],
       },
       runtime: {
-        activeSessionFile: 'agents/storage-test/runtime/active-session.json',
+        activeSessionFile: 'agents/opencode/storage-test/runtime/active-session.json',
         resume: true,
       },
       data: { ...(cliHome ? { cliHome } : {}) },
@@ -31,7 +36,7 @@ function descriptor(cliHome?: string): NodeDescriptor {
 
 test('defaults CLI home inside the node private data directory', () => {
   const home = resolveNodeCliHome(descriptor(), '.opencode');
-  assert.ok(home.endsWith(join('agents', 'storage-test', 'data', 'cli', '.opencode')));
+  assert.ok(home.endsWith(join('agents', 'opencode', 'storage-test', 'data', 'cli', '.opencode')));
 });
 
 test('rejects CLI homes outside the node private data directory', () => {
@@ -40,7 +45,7 @@ test('rejects CLI homes outside the node private data directory', () => {
     /must stay inside/,
   );
   assert.throws(
-    () => resolveNodeCliHome(descriptor('agents/other-node/data/cli/.opencode'), '.opencode'),
+    () => resolveNodeCliHome(descriptor('agents/opencode/other-node/data/cli/.opencode'), '.opencode'),
     /must stay inside/,
   );
 });
@@ -55,12 +60,19 @@ test('uses one per-node directory for all temporary environment variables', () =
 test('keeps config, runtime, and CLI data inside their respective node roots', () => {
   assert.doesNotThrow(() => assertNodeStorageOwnership(descriptor()));
   const escaped = descriptor();
-  escaped.storage.config.identityFile = 'agents/other-node/config/identity.md';
+  escaped.storage.config.identityFile = 'agents/opencode/other-node/config/identity.md';
   assert.throws(() => assertNodeStorageOwnership(escaped), /identityFile must stay inside/);
 
   const shared = descriptor();
   shared.storage.runtime.activeSessionFile = 'shared/project/runtime/active-session.json';
   assert.throws(() => assertNodeStorageOwnership(shared), /activeSessionFile must stay inside/);
+});
+
+test('formats and parses provider-scoped node keys', () => {
+  assert.equal(formatNodeKey('codex', 'reviewer'), 'codex:reviewer');
+  assert.deepEqual(parseNodeKey('claude:reviewer'), { provider: 'claude', localId: 'reviewer' });
+  assert.throws(() => parseNodeKey('reviewer'), /Invalid node key/);
+  assert.throws(() => formatNodeKey('codex', 'Reviewer'), /invalid local node id/);
 });
 
 test('reserves project and team shared storage without creating it', () => {

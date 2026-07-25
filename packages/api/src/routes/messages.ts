@@ -17,7 +17,7 @@ const messagesRoutes: FastifyPluginCallback<MessagesRouteOptions> = (app, option
   app.post('/api/messages', async (request, reply) => {
     const body = (request.body ?? {}) as { content?: unknown; nodeId?: unknown };
     const content = typeof body.content === 'string' ? body.content : '';
-    const nodeId = typeof body.nodeId === 'string' ? body.nodeId : 'codex-node';
+    const nodeId = typeof body.nodeId === 'string' ? body.nodeId : 'codex:codex-node';
 
     if (content.trim().length === 0) {
       return reply.code(400).send({ error: 'content is required' });

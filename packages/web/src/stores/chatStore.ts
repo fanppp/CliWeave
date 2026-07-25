@@ -74,7 +74,7 @@ const nextId = (): string => `m${Date.now()}_${seq++}`;
 export const useChatStore = create<ChatState>((set) => ({
   messages: [],
   isStreaming: false,
-  activeNodeId: 'codex-node',
+  activeNodeId: 'codex:codex-node',
   reloadKey: 0,
   setActiveNode: (id) => set({ activeNodeId: id }),
   addUser: (content) =>

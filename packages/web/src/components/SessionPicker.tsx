@@ -23,7 +23,7 @@ export function SessionPicker() {
   const [creating, setCreating] = useState(false);
 
   const refresh = (): void => {
-    fetch(`${API_URL}/api/agents/${activeNodeId}/sessions`)
+    fetch(`${API_URL}/api/agents/${encodeURIComponent(activeNodeId)}/sessions`)
       .then((r) => (r.ok ? r.json() : { sessions: [], activeSessionId: null }))
       .then((d) => {
         setSessions(Array.isArray(d.sessions) ? d.sessions : []);
@@ -35,7 +35,7 @@ export function SessionPicker() {
   useEffect(refresh, [activeNodeId, reloadKey]);
 
   const activate = (sid: string): void => {
-    fetch(`${API_URL}/api/agents/${activeNodeId}/sessions/activate`, {
+    fetch(`${API_URL}/api/agents/${encodeURIComponent(activeNodeId)}/sessions/activate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId: sid }),
@@ -51,7 +51,7 @@ export function SessionPicker() {
     if (creating || isStreaming) return;
     setCreating(true);
     try {
-      const response = await fetch(`${API_URL}/api/agents/${activeNodeId}/sessions/new`, {
+      const response = await fetch(`${API_URL}/api/agents/${encodeURIComponent(activeNodeId)}/sessions/new`, {
         method: 'POST',
       });
       if (!response.ok) return;

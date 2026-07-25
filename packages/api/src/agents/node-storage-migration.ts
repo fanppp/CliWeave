@@ -28,6 +28,22 @@ interface LegacyDescriptor {
   storage?: unknown;
 }
 
+interface V2Descriptor {
+  schemaVersion: 2;
+  migrationPending?: boolean;
+  id: string;
+  name: string;
+  provider: string;
+  cli: unknown;
+  model?: string;
+  storage: {
+    config: { identityFile: string; rulesFiles: string[] };
+    runtime: { activeSessionFile: string; resume: boolean };
+    data: { cliHome?: string };
+  };
+  skills?: unknown;
+}
+
 const PROVIDER_HOMES: Record<string, string> = {
   codex: '.codex',
   claude: '.claude',
@@ -208,6 +224,65 @@ export function normalizeLockedLegacyDescriptor(id: string, value: unknown): unk
     },
     ...(raw.skills !== undefined ? { skills: raw.skills } : {}),
   };
+}
+
+function v3Descriptor(localId: string, raw: V2Descriptor, pending: boolean): unknown {
+  const base = `agents/${raw.provider}/${localId}`;
+  const providerHome = basename(raw.storage.data.cliHome ?? `.${raw.provider}`);
+  return {
+    schemaVersion: 3,
+    ...(pending ? { migrationPending: true } : {}),
+    localId,
+    name: raw.name,
+    provider: raw.provider,
+    cli: raw.cli,
+    ...(raw.model !== undefined ? { model: raw.model } : {}),
+    storage: pending
+      ? raw.storage
+      : {
+          config: {
+            identityFile: `${base}/config/identity.md`,
+            rulesFiles: [`${base}/config/rules/*.md`],
+          },
+          runtime: {
+            activeSessionFile: `${base}/runtime/active-session.json`,
+            resume: raw.storage.runtime.resume,
+          },
+          data: { cliHome: `${base}/data/cli/${providerHome}` },
+        },
+    ...(raw.skills !== undefined ? { skills: raw.skills } : {}),
+  };
+}
+
+/** Move one v2 flat node into its provider directory and write schema v3. */
+export function migrateFlatNodeHierarchy(localId: string, value: unknown): unknown {
+  const raw = value as V2Descriptor;
+  if (!raw || raw.schemaVersion !== 2 || raw.id !== localId || typeof raw.provider !== 'string') return value;
+  const root = getProjectRoot();
+  const sourceDir = join(root, 'agents', localId);
+  const targetDir = join(root, 'agents', raw.provider, localId);
+  if (existsSync(sourceDir)) {
+    if (existsSync(targetDir)) throw new Error(`Node hierarchy migration conflict: ${sourceDir} -> ${targetDir}`);
+    mkdirSync(dirname(targetDir), { recursive: true });
+    renameSync(sourceDir, targetDir);
+  } else {
+    mkdirSync(targetDir, { recursive: true });
+  }
+  const descriptor = v3Descriptor(localId, raw, false);
+  const targetFile = join(targetDir, 'node.json');
+  const tempFile = `${targetFile}.tmp`;
+  writeFileSync(tempFile, `${JSON.stringify(descriptor, null, 2)}\n`, 'utf-8');
+  renameSync(tempFile, targetFile);
+  rmSync(join(root, 'agents', `${localId}.json`), { force: true });
+  return descriptor;
+}
+
+/** Build a schema-v3 compatibility descriptor without moving a locked flat node. */
+export function normalizeLockedFlatDescriptor(localId: string, value: unknown): unknown {
+  const v2 = value && typeof value === 'object' && (value as LegacyDescriptor).schemaVersion === 2
+    ? value
+    : normalizeLockedLegacyDescriptor(localId, value);
+  return v3Descriptor(localId, v2 as V2Descriptor, true);
 }
 
 /** Reserved shared storage roots. This function never creates them. */

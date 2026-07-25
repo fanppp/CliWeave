@@ -5,7 +5,8 @@
 每个节点固定使用三类目录：
 
 ```text
-agents/<node-id>/
+agents/<provider>/<local-id>/
+├── node.json
 ├── config/
 │   ├── identity.md
 │   └── rules/
@@ -21,6 +22,8 @@ agents/<node-id>/
 - `data/cli/` 是 CLI 原生 home。其内部目录是 CLI 私有格式，不得重命名或手工归并。
 - descriptor 的配置、运行状态和 CLI 数据路径必须分别位于上述对应目录。绝对 C 盘路径、`..` 越界路径、其他节点目录和共享区路径都必须拒绝。
 
+节点在 API、WebSocket 和前端状态中使用 canonical `nodeKey = provider:localId`。不同 provider 可以复用同一 `localId`；同一 provider 内 `localId` 唯一，显示名也按忽略大小写唯一。重复创建返回 HTTP `409`。`provider` 与 `localId` 创建后不可修改。
+
 | Provider | CLI home | 原生会话位置 | 必需环境变量 |
 |---|---|---|---|
 | Codex | `data/cli/.codex` | `.codex/sessions/**/*.jsonl` | `CODEX_HOME` |
@@ -33,13 +36,14 @@ Windows 下 OpenCode 必须解析 npm shim 并直接 spawn `opencode.exe`，否�
 
 ## 布局迁移
 
-API 启动时将无 `schemaVersion: 2` 的旧节点自动迁移：
+API 启动时按顺序将 v1/v2 扁平节点迁移到 `schemaVersion: 3`：
 
 - `identity.md`、`rules/` 移入 `config/`。
 - `sessions/active.json` 移为 `runtime/active-session.json`。
 - `memory/<provider-home>` 整体移入 `data/cli/`，内部层级保持不变。
 - 迁移可重复执行；目标已存在且内容冲突时停止启动并报告源、目标路径，绝不覆盖。
 - descriptor 在数据移动完成后原子更新。只删除已经没有数据的旧目录。
+- v2 的 `agents/<local-id>.json` 与 `agents/<local-id>/` 整体迁入 `agents/<provider>/<local-id>/node.json`。
 - Windows 因正在运行的 CLI 锁定 home 时，节点以 `migrationPending` 兼容态继续读取旧路径，不返回 404；后续访问自动重试。只有 `EPERM/EBUSY` 可进入该状态，真实目录冲突仍隔离节点。
 
 从用户全局 home 导入历史数据仍使用：

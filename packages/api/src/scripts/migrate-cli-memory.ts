@@ -2,7 +2,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statS
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { migrateAllNodeStorageLayouts, readNodeDescriptor } from '../agents/NodeDescriptor.js';
+import { migrateAllNodeStorageLayouts, nodeRoot, readNodeDescriptor } from '../agents/NodeDescriptor.js';
 import { ensureCodexHome, resolveCodexHome } from '../agents/codex-home.js';
 import { ensureClaudeHome, resolveClaudeHome } from '../agents/claude-home.js';
 import { ensureOpencodeHome, opencodeXdgEnv, resolveOpencodeHome, resolveOpencodeInvocation } from '../agents/opencode-home.js';
@@ -73,7 +73,7 @@ function copyMissing(source: string, target: string): void {
 }
 
 function migrateCodex(): void {
-  const descriptor = readNodeDescriptor('codex-node');
+  const descriptor = readNodeDescriptor('codex:codex-node');
   const targetHome = resolveCodexHome(descriptor);
   const sourceSessions = join(homedir(), '.codex', 'sessions');
   if (apply) ensureCodexHome(targetHome);
@@ -85,7 +85,7 @@ function migrateCodex(): void {
 }
 
 function migrateClaude(): void {
-  const descriptor = readNodeDescriptor('claude-node');
+  const descriptor = readNodeDescriptor('claude:claude-node');
   const targetProjects = join(resolveClaudeHome(descriptor), 'projects');
   const sourceProjects = join(homedir(), '.claude', 'projects');
   if (apply) ensureClaudeHome(resolveClaudeHome(descriptor));
@@ -163,14 +163,17 @@ function migrateOpenCodeSource(label: string, sourceEnv: NodeJS.ProcessEnv, targ
 }
 
 function migrateOpenCode(): void {
-  const descriptor = readNodeDescriptor('opencode-node');
+  const descriptor = readNodeDescriptor('opencode:opencode-node');
   const targetHome = resolveOpencodeHome(descriptor);
   if (apply) ensureOpencodeHome(targetHome);
   migrateOpenCodeSource('global XDG data', globalOpenCodeEnv(), targetHome);
 
+  const descriptorRoot = descriptor.migrationPending
+    ? join(root, 'agents', descriptor.localId)
+    : nodeRoot(descriptor);
   const legacyRoots = [
-    join(root, 'agents', descriptor.id, 'memory'),
-    join(root, 'agents', descriptor.id, 'data', 'cli', '.legacy-v1'),
+    join(descriptorRoot, 'memory'),
+    join(descriptorRoot, 'data', 'cli', '.legacy-v1'),
   ];
   for (const legacyRoot of legacyRoots) {
     const legacyDb = join(legacyRoot, '.local', 'share', 'opencode', 'opencode.db');

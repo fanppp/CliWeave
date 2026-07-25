@@ -12,10 +12,10 @@ interface ProviderMeta {
   installed: boolean;
 }
 
-export function AddNodeModal({ onClose, onCreated }: { onClose: () => void; onCreated: (id: string) => void }) {
+export function AddNodeModal({ onClose, onCreated }: { onClose: () => void; onCreated: (nodeKey: string) => void }) {
   const [providers, setProviders] = useState<ProviderMeta[]>([]);
   const [provider, setProvider] = useState('codex');
-  const [id, setId] = useState('');
+  const [localId, setLocalId] = useState('');
   const [name, setName] = useState('');
   const [model, setModel] = useState('');
   const [busy, setBusy] = useState(false);
@@ -31,21 +31,21 @@ export function AddNodeModal({ onClose, onCreated }: { onClose: () => void; onCr
   }, []);
 
   const submit = async (): Promise<void> => {
-    const trimmedId = id.trim();
+    const trimmedId = localId.trim();
     if (!trimmedId || busy) return;
     setBusy(true);
     setError('');
     try {
-      const res = await fetch(`${API_URL}/api/agents/${trimmedId}`, {
+      const res = await fetch(`${API_URL}/api/providers/${encodeURIComponent(provider)}/agents`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider, name: name.trim() || trimmedId, model: model.trim() }),
+        body: JSON.stringify({ localId: trimmedId, name: name.trim() || trimmedId, model: model.trim() }),
       });
       const d = await res.json();
       if (!res.ok) {
         setError(d.error ?? '创建失败');
       } else {
-        onCreated(trimmedId);
+        onCreated(d.nodeKey);
       }
     } catch (e) {
       setError(String(e));
@@ -69,12 +69,12 @@ export function AddNodeModal({ onClose, onCreated }: { onClose: () => void; onCr
           ))}
         </select>
 
-        <label style={styles.label}>节点 ID（英文，唯一）</label>
+        <label style={styles.label}>本地 ID（同一 CLI 内唯一）</label>
         <input
           style={styles.input}
-          value={id}
-          onChange={(e) => setId(e.target.value.replace(/[^a-zA-Z0-9_-]/g, '-'))}
-          placeholder='如：codex-reviewer'
+          value={localId}
+          onChange={(e) => setLocalId(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '-'))}
+          placeholder='如：reviewer'
         />
 
         <label style={styles.label}>显示名</label>
@@ -89,7 +89,7 @@ export function AddNodeModal({ onClose, onCreated }: { onClose: () => void; onCr
           <button style={styles.cancelBtn} onClick={onClose} disabled={busy}>
             取消
           </button>
-          <button style={styles.createBtn} onClick={() => void submit()} disabled={busy || !id.trim()}>
+          <button style={styles.createBtn} onClick={() => void submit()} disabled={busy || !localId.trim()}>
             {busy ? '创建中…' : '创建'}
           </button>
         </div>

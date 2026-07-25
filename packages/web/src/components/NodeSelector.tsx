@@ -7,7 +7,8 @@ import { AddNodeModal } from './AddNodeModal';
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3004';
 
 interface NodeItem {
-  id: string;
+  nodeKey: string;
+  localId: string;
   name: string;
   provider: string;
 }
@@ -36,9 +37,10 @@ export function NodeSelector() {
 
   const del = async (id: string): Promise<void> => {
     if (!confirm(`删除节点 ${id}？其配置与记忆目录会一并删除。`)) return;
-    await fetch(`${API_URL}/api/agents/${id}`, { method: 'DELETE' });
+    const response = await fetch(`${API_URL}/api/agents/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!response.ok) return;
     if (id === activeNodeId && nodes.length > 0) {
-      const next = nodes.find((n) => n.id !== id)?.id ?? 'codex-node';
+      const next = nodes.find((n) => n.nodeKey !== id)?.nodeKey ?? 'codex:codex-node';
       setActiveNode(next);
     }
     refresh();
@@ -56,8 +58,8 @@ export function NodeSelector() {
     <div style={styles.wrap}>
       <select style={styles.select} value={activeNodeId} onChange={(e) => switchNode(e.target.value)}>
         {nodes.map((n) => (
-          <option key={n.id} value={n.id}>
-            {n.name} ({n.provider})
+          <option key={n.nodeKey} value={n.nodeKey}>
+            {n.name} ({n.provider}/{n.localId})
           </option>
         ))}
       </select>
