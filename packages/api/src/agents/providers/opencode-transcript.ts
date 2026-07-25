@@ -41,12 +41,18 @@ function cached<T>(cache: Map<string, CacheEntry<T>>, key: string, load: () => P
 function runJson(command: string, args: string[], xdgEnv: Record<string, string>, timeoutMs: number): Promise<unknown> {
   return new Promise((resolve) => {
     const invocation = resolveOpencodeInvocation(command);
-    const child = spawn(invocation.command, args, {
-      shell: invocation.shell,
-      windowsHide: true,
-      env: { ...process.env, ...xdgEnv },
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(invocation.command, args, {
+        shell: invocation.shell,
+        windowsHide: true,
+        env: { ...process.env, ...xdgEnv },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      resolve(null);
+      return;
+    }
     const chunks: Buffer[] = [];
     let size = 0;
     let settled = false;
@@ -60,7 +66,7 @@ function runJson(command: string, args: string[], xdgEnv: Record<string, string>
       child.kill();
       finish(null);
     }, timeoutMs);
-    child.stdout.on('data', (chunk: Buffer) => {
+    child.stdout?.on('data', (chunk: Buffer) => {
       size += chunk.length;
       if (size > 64 * 1024 * 1024) {
         child.kill();
@@ -92,10 +98,15 @@ async function exportSession(
   command = 'opencode',
   xdgEnv: Record<string, string> = {},
 ): Promise<OpencodeMessage[] | null> {
-  return cached(exportCache, cacheKey(command, xdgEnv, sessionId), async () => {
-    const parsed = await runJson(command, ['export', sessionId], xdgEnv, 10_000) as Record<string, unknown> | null;
-    return parsed && Array.isArray(parsed.messages) ? parsed.messages as OpencodeMessage[] : null;
-  });
+  try {
+    return await cached(exportCache, cacheKey(command, xdgEnv, sessionId), async () => {
+      const parsed = await runJson(command, ['export', sessionId], xdgEnv, 10_000) as Record<string, unknown> | null;
+      return parsed && Array.isArray(parsed.messages) ? parsed.messages as OpencodeMessage[] : null;
+    });
+  } catch {
+    exportCache.delete(cacheKey(command, xdgEnv, sessionId));
+    return null;
+  }
 }
 
 export async function readOpencodeTranscript(
@@ -109,7 +120,7 @@ export async function readOpencodeTranscript(
   for (const msg of messages) {
     const role = msg.info?.role;
     const timestamp = msg.info?.time?.created ?? Date.now();
-    for (const part of msg.parts ?? []) {
+    for (const part of Array.isArray(msg.parts) ? msg.parts : []) {
       if (part.type === 'text' && typeof part.text === 'string') {
         if (role === 'user') {
           const content = stripL0Prefix(part.text);
@@ -142,13 +153,17 @@ export async function listOpencodeSessions(
   command = 'opencode',
   xdgEnv: Record<string, string> = {},
 ): Promise<SessionSummary[]> {
-  return cached(sessionsCache, cacheKey(command, xdgEnv), async () => {
-    const parsed = await runJson(command, ['session', 'list', '--format', 'json'], xdgEnv, 5_000) as
-      | Array<Record<string, unknown>>
-      | { sessions?: Array<Record<string, unknown>> }
-      | null;
-    const sessions = Array.isArray(parsed) ? parsed : parsed?.sessions ?? [];
-    return sessions.flatMap((session) => {
+  const key = cacheKey(command, xdgEnv);
+  try {
+    return await cached(sessionsCache, key, async () => {
+      const parsed = await runJson(command, ['session', 'list', '--format', 'json'], xdgEnv, 5_000) as unknown;
+      const sessions: Array<Record<string, unknown>> = Array.isArray(parsed)
+        ? parsed.filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+        : typeof parsed === 'object' && parsed !== null && Array.isArray((parsed as Record<string, unknown>).sessions)
+          ? ((parsed as Record<string, unknown>).sessions as unknown[])
+              .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+          : [];
+      return sessions.flatMap((session) => {
       const sessionId = typeof session.id === 'string'
         ? session.id
         : typeof session.sessionID === 'string' ? session.sessionID : '';
@@ -161,6 +176,10 @@ export async function listOpencodeSessions(
         preview: typeof session.title === 'string' ? session.title.slice(0, 60) : '(opencode 会话)',
         messageCount: typeof session.messageCount === 'number' ? session.messageCount : 0,
       }];
+      });
     });
-  });
+  } catch {
+    sessionsCache.delete(key);
+    return [];
+  }
 }
