@@ -5,8 +5,8 @@
  * PUT  /api/agents/:id/identity  更新 identity.md
  * PUT  /api/agents/:id/rules   追加一条 rule 文件
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { resolve, join } from 'node:path';
 import type { FastifyInstance, FastifyPluginCallback } from 'fastify';
 import {
   type NodeDescriptor,
@@ -16,6 +16,7 @@ import {
   writeNodeDescriptor,
 } from '../agents/NodeDescriptor.js';
 import { clearActiveSession, getActiveSession, setActiveSession } from '../agents/SessionChain.js';
+import { PROVIDERS } from '../agents/register-providers.js';
 import { listNodeSessions, readNodeTranscript } from '../agents/transcript-router.js';
 import { getProjectRoot } from '../utils/project-root.js';
 import { resolveGlob } from '../utils/glob.js';
@@ -112,14 +113,65 @@ const agentsRoutes: FastifyPluginCallback = (app, _options, done) => {
     return { status: 'ok', activeSessionId: null };
   });
 
+  app.get('/api/agents/providers', async () => PROVIDERS);
+
   app.post('/api/agents/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
     const body = request.body as Record<string, unknown>;
-    const parsed = NodeDescriptorSchema.safeParse({ ...body, id });
+    // 补默认 cliHome（按 provider）
+    const provider = typeof body.provider === 'string' ? body.provider : 'codex';
+    const meta = PROVIDERS.find((p) => p.id === provider);
+    const memoryHome = meta?.memoryHome ?? `.${provider}`;
+    const descriptorDefaults = {
+      cli: { command: meta?.command ?? provider },
+      prompt: { identity: `agents/${id}/identity.md` },
+      rules: { files: [`agents/${id}/rules/*.md`] },
+      memory: {
+        session: { resume: true, dir: `agents/${id}/sessions` },
+        cliHome: `agents/${id}/memory/${memoryHome}`,
+      },
+    };
+    const parsed = NodeDescriptorSchema.safeParse({ ...descriptorDefaults, ...body, id });
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid descriptor', issues: parsed.error.issues });
     }
+    const isNew = !existsSync(join(getProjectRoot(), 'agents', `${id}.json`));
     writeNodeDescriptor(id, parsed.data);
+
+    // 新节点：脚手架目录 + 默认 identity/rules
+    if (isNew) {
+      const root = getProjectRoot();
+      const nodeDir = join(root, 'agents', id);
+      mkdirSync(join(nodeDir, 'rules'), { recursive: true });
+      mkdirSync(join(nodeDir, 'sessions'), { recursive: true });
+      const identityPath = parsed.data.prompt?.identity ?? `agents/${id}/identity.md`;
+      const identityFull = resolve(root, identityPath);
+      if (!existsSync(identityFull)) {
+        writeFileSync(
+          identityFull,
+          `# ${parsed.data.name} 节点身份\n\n你是 0AgentTeams 平台中的一个 Agent 节点，由 ${parsed.data.provider} CLI 驱动。\n\n## 你的能力\n- 你可以直接读写当前项目的源码文件（工作目录 = 项目根）。\n- 你能编辑 agents/${id}/ 下的 identity.md 与 rules/*.md 改变自己的行为。\n\n## 工作方式\n- 收到需求后先理解意图，再用工具落地。改动小而精准，改完简要说明。\n`,
+          'utf-8',
+        );
+      }
+      const rulesPath = join(nodeDir, 'rules', 'general.md');
+      if (!existsSync(rulesPath)) {
+        writeFileSync(rulesPath, `# ${parsed.data.name} 通用规则\n\n## 沟通\n- 用中文回答，除非用户用其它语言提问。\n- 回答简洁直接。\n`, 'utf-8');
+      }
+      writeFileSync(join(nodeDir, 'sessions', '.gitkeep'), '', 'utf-8');
+    }
+    return { status: 'ok', id, created: isNew };
+  });
+
+  app.delete('/api/agents/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const root = getProjectRoot();
+    const jsonFile = join(root, 'agents', `${id}.json`);
+    const nodeDir = join(root, 'agents', id);
+    if (!existsSync(jsonFile)) {
+      return reply.code(404).send({ error: `node not found: ${id}` });
+    }
+    rmSync(jsonFile, { force: true });
+    rmSync(nodeDir, { recursive: true, force: true });
     return { status: 'ok', id };
   });
 

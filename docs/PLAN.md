@@ -25,7 +25,7 @@
 ## Phase 2 — 多 provider + 显式静态图
 
 - [x] 2.1 多 provider：codex/claude/opencode/gemini 四个 AgentService 实现 + 各自事件转换 + 注册表
-- [ ] 2.2 web 加/删节点（选 CLI→填配置→脚手架 agents/\<id\>/{identity,rules,memory}）+ DELETE 路由
+- [x] 2.2 web 加/删/选节点：POST 脚手架建目录+默认 identity/rules + DELETE + GET providers + NodeSelector/新节点表单
 - [ ] 2.3 Graph 画布（@xyflow/react 增删节点/连线/拖动）→ 存 graph.json
 - [ ] 2.4 AgentRouter（读 graph.json 边拓扑串/并行调度）
 
@@ -55,6 +55,7 @@
 - [2026-07-24] 1.10 - 会话切换器：listCodexSessions 列项目内全部会话(sessionId+预览+条数)；GET /api/agents/:id/sessions + POST .../sessions/activate；web SessionPicker 下拉切换/恢复指定 CLI 对话。把全局里属于本项目的 6 个旧 transcript 迁移进项目，激活 light 模式那次(019f9323,20条)。chatStore 加 reloadKey/triggerReload 触发重新加载历史。
 - [2026-07-24] 1.11 - 会话流控: messages 路由调用结束广播 done + 防并发发送 + ChatInput 忙闲状态指示 + chatStore done/session_init 后刷新历史/会话列表。git 初始化并提交(e36bd1e + 1ff353d)。
 - [2026-07-24] 2.1 - 多 provider 完成：新增 ClaudeAgentService(claude -p --output-format stream-json --verbose --dangerously-skip-permissions，项目内 CLAUDE_CONFIG_DIR + 凭证 copy-on-missing + claude-transcript 读 projects/\<hash\>/\<sid\>.jsonl，实测 hello+历史2条)、OpenCodeAgentService(opencode run --format json，位置参数 prompt，实测 sessionInit+hello)、GeminiAgentService(按 clowder-ai 文档 best-effort，gemini 未装待测)。transcript-router 按 provider 调度 read/list。注册表 registerAllProviders 注册四个。新增 claude-node + opencode-node 节点配置。加新 CLI = provider 类+事件转换+注册一行+可选 transcript reader。
+- [2026-07-24] 2.2 - web 加/删/选节点：POST /api/agents/:id 改为脚手架建目录+默认 identity/rules/sessions（按 provider 补默认 cliHome）+ isNew 检测；新增 DELETE /api/agents/:id（删 JSON+目录）；GET /api/agents/providers 返回四 provider 元数据(installed 标记)。web：NodeSelector(下拉切换节点+刷新历史)、AddNodeModal(选 provider+填 id/name/model→POST→切换)、删除按钮。实测：建 test-node 脚手架生成 identity/rules/sessions，DELETE 清除干净。
 
 ## 差距评估（2026-07-24，对照最终目标）
 
@@ -63,14 +64,12 @@
 | 维度 | 现状 | 差距 |
 |------|------|------|
 | 任意 CLI 节点 | ✅ codex/claude/opencode/gemini 四 provider 全实现 | ✅（gemini 未装待测，其余实测通过） |
-| 可选哪个 CLI | NodeDescriptor 有 provider/command/model/sandbox 字段 | ❌ web 无"选 CLI 建节点"UI |
-| per-node memory | ✅ codex；其它 CLI 各有 home | ⚠️ claude/opencode/gemini 各需 home 解析+transcript reader |
-| per-node skills | ❌ descriptor.skills.mcp 空，无 MCP 注入 | ❌ Phase 3（clowder-ai buildCatCafeMcpArgs） |
-| per-node rules/identity | ✅ L0Injector | — |
-| 即插即用/即删即弃 | 有 POST /api/agents 建 + .../new 新会话；无 DELETE | ❌ 无删节点路由+UI；建需脚手架 agents/\<id\>/{identity,rules,memory} |
-| web 加节点 | 无 UI | ❌ 加节点面板（选 CLI→填配置→生成 JSON+目录） |
-| 拖动节点 | 无 react-flow | ❌ 未装 @xyflow/react，无 Graph 画布 |
-| AgentRouter | 单节点直连 | ❌ 读 graph.json 拓扑串/并行调度 |
+| 可选哪个 CLI 建 | ✅ web 新节点表单选 provider（codex/claude/opencode/gemini） | ✅ |
+| 即插即用/即删即弃 | ✅ POST 脚手架建 + DELETE 删 + web UI | ✅ |
+| web 加节点 | ✅ NodeSelector + AddNodeModal | ✅ |
+| 拖动节点（react-flow）| ❌ | 2.3 |
+| AgentRouter 多节点调度 | ❌ | 2.4 |
+| per-node skills/MCP | ❌ | Phase 3 |
 
 下一步优先级：① 多 provider（claude/opencode/gemini）② web 加/删节点 ③ Graph 画布 @xyflow/react ④ AgentRouter ⑤ per-node skills/MCP。
 骨架（注册表 + NodeDescriptor 数据驱动）已铺好，全是加法不重写。

@@ -8,6 +8,23 @@ import { ClaudeAgentService } from './providers/ClaudeAgentService.js';
 import { OpenCodeAgentService } from './providers/OpenCodeAgentService.js';
 import { GeminiAgentService } from './providers/GeminiAgentService.js';
 
+/** 已支持的 provider 元数据（供 web "加节点"时选 CLI） */
+export interface ProviderMeta {
+  id: string;
+  name: string;
+  command: string;
+  /** 默认 memory home 子目录名（agents/<id>/memory/<this>） */
+  memoryHome: string;
+  installed: boolean;
+}
+
+export const PROVIDERS: ProviderMeta[] = [
+  { id: 'codex', name: 'Codex (OpenAI)', command: 'codex', memoryHome: '.codex', installed: true },
+  { id: 'claude', name: 'Claude Code', command: 'claude', memoryHome: '.claude', installed: true },
+  { id: 'opencode', name: 'OpenCode', command: 'opencode', memoryHome: '.opencode', installed: true },
+  { id: 'gemini', name: 'Gemini CLI', command: 'gemini', memoryHome: '.gemini', installed: false },
+];
+
 let registered = false;
 
 /** 启动时调用一次，注册所有 provider */

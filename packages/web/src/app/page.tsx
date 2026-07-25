@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { ChatInput } from '@/components/ChatInput';
 import { MessageStream } from '@/components/MessageStream';
 import { NodeConfigPanel } from '@/components/NodeConfigPanel';
+import { NodeSelector } from '@/components/NodeSelector';
 import { SessionPicker } from '@/components/SessionPicker';
 import { useSocket } from '@/hooks/useSocket';
 import { useNodeHistory } from '@/hooks/useNodeHistory';
@@ -33,6 +34,7 @@ export default function Home() {
       <header style={styles.header}>
         <h1 style={styles.title}>0AgentTeams</h1>
         <div style={styles.headerActions}>
+          <NodeSelector />
           <SessionPicker />
           <span style={styles.status}>
             WebSocket:{' '}
