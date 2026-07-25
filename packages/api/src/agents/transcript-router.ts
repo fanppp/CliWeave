@@ -2,7 +2,7 @@
  * transcript 调度器：按 provider 选对应的 transcript reader + session lister。
  * 加新 CLI = 在这里加一个 case + 写该 CLI 的 transcript reader。
  */
-import type { HistoryEntry } from './HistoryStore.js';
+import type { HistoryEntry } from './types.js';
 import type { NodeDescriptor } from './NodeDescriptor.js';
 import { resolveCodexHome } from './codex-home.js';
 import { listCodexSessions, readCodexTranscript } from './providers/codex-transcript.js';
@@ -18,7 +18,7 @@ export interface SessionSummary {
   messageCount: number;
 }
 
-export function readNodeTranscript(descriptor: NodeDescriptor, sessionId: string): HistoryEntry[] {
+export async function readNodeTranscript(descriptor: NodeDescriptor, sessionId: string): Promise<HistoryEntry[]> {
   switch (descriptor.provider) {
     case 'codex':
       return readCodexTranscript(sessionId, resolveCodexHome(descriptor));
@@ -33,7 +33,7 @@ export function readNodeTranscript(descriptor: NodeDescriptor, sessionId: string
   }
 }
 
-export function listNodeSessions(descriptor: NodeDescriptor): SessionSummary[] {
+export async function listNodeSessions(descriptor: NodeDescriptor): Promise<SessionSummary[]> {
   switch (descriptor.provider) {
     case 'codex':
       return listCodexSessions(resolveCodexHome(descriptor));

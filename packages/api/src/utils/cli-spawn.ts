@@ -51,7 +51,7 @@ export async function* spawnCli(
     cwd: options.cwd,
     env: options.env ? { ...process.env, ...options.env } : undefined,
     stdio: [options.stdinInput != null ? 'pipe' : 'ignore', 'pipe', 'pipe'],
-    ...(IS_WINDOWS ? { shell: true } : {}),
+    ...((options.shell ?? IS_WINDOWS) ? { shell: true } : { shell: false }),
   });
 
   // prompt 经 stdin

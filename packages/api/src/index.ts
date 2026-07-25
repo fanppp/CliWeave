@@ -5,6 +5,7 @@
 import cors from '@fastify/cors';
 import Fastify from 'fastify';
 import { registerAllProviders } from './agents/register-providers.js';
+import { migrateAllNodeStorageLayouts } from './agents/NodeDescriptor.js';
 import { SocketManager } from './infrastructure/websocket/SocketManager.js';
 import agentsRoutes from './routes/agents.js';
 import messagesRoutes from './routes/messages.js';
@@ -19,6 +20,9 @@ const WEB_ORIGINS = (process.env.WEB_ORIGIN ?? 'http://localhost:3000')
 let socketManager: SocketManager | null = null;
 
 async function main(): Promise<void> {
+  // Migrate v1 node directories before any CLI can open its private data.
+  const migrationFailures = migrateAllNodeStorageLayouts();
+  for (const failure of migrationFailures) console.error(`[storage] node migration deferred: ${failure}`);
   // 注册所有 provider（codex / claude / opencode / gemini…）
   registerAllProviders();
 

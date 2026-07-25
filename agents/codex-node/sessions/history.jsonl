@@ -1,3 +1,0 @@
-{"role":"user","content":"say hi","timestamp":1784882678802}
-{"role":"agent","type":"text","content":"[notice] `[features].collab` is deprecated. Use `[features].multi_agent` instead. (Enable it with `--enable multi_agent` or `[features].multi_agent` in config.toml. See https://developers.openai.com/codex/config-basic#feature-flags for details.)","timestamp":1784882679511}
-{"role":"agent","type":"text","content":"Hi!","timestamp":1784882684935}

@@ -5,7 +5,7 @@
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import type { HistoryEntry } from '../HistoryStore.js';
+import type { HistoryEntry } from '../types.js';
 
 function stripEnvContext(text: string): string {
   return text

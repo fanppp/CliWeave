@@ -1,4 +1,5 @@
 {
+  "schemaVersion": 2,
   "id": "opencode-node",
   "name": "OpenCode",
   "provider": "opencode",
@@ -9,20 +10,23 @@
     "promptVia": "argv",
     "cwd": "${PROJECT_ROOT}"
   },
-  "model": "",
-  "prompt": {
-    "identity": "agents/opencode-node/identity.md"
-  },
-  "rules": {
-    "files": ["agents/opencode-node/rules/*.md"]
+  "model": "alibaba-cn/glm-5.2",
+  "storage": {
+    "config": {
+      "identityFile": "agents/opencode-node/config/identity.md",
+      "rulesFiles": [
+        "agents/opencode-node/config/rules/*.md"
+      ]
+    },
+    "runtime": {
+      "activeSessionFile": "agents/opencode-node/runtime/active-session.json",
+      "resume": true
+    },
+    "data": {
+      "cliHome": "agents/opencode-node/data/cli/.opencode"
+    }
   },
   "skills": {
     "mcp": []
-  },
-  "memory": {
-    "session": {
-      "resume": true,
-      "dir": "agents/opencode-node/sessions"
-    }
   }
 }

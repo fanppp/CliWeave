@@ -5,7 +5,7 @@
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import type { HistoryEntry } from '../HistoryStore.js';
+import type { HistoryEntry } from '../types.js';
 
 /** 递归找含 sessionId 的 rollout 文件（在指定 codexHome/sessions 下） */
 function findRolloutFile(sessionId: string, codexHome: string): string | undefined {

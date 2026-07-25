@@ -12,6 +12,8 @@ export interface CliSpawnOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
+  /** Override platform default shell handling. Native executables should use false. */
+  shell?: boolean;
   /** prompt 经 stdin 传入（防 ps 泄露对话）。设此项则 stdio[0]='pipe' */
   stdinInput?: string;
   invocationId?: string;

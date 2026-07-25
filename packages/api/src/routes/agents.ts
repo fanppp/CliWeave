@@ -48,9 +48,9 @@ const agentsRoutes: FastifyPluginCallback = (app, _options, done) => {
       return reply.code(404).send({ error: `node not found: ${id}` });
     }
     const root = getProjectRoot();
-    const identity = descriptor.prompt?.identity ? readText(resolve(root, descriptor.prompt.identity)) : undefined;
+    const identity = readText(resolve(root, descriptor.storage.config.identityFile));
     const rules: { file: string; content: string }[] = [];
-    for (const pattern of descriptor.rules?.files ?? []) {
+    for (const pattern of descriptor.storage.config.rulesFiles) {
       for (const file of resolveGlob(pattern, root)) {
         const content = readText(file);
         if (content !== undefined) rules.push({ file, content });
@@ -69,7 +69,7 @@ const agentsRoutes: FastifyPluginCallback = (app, _options, done) => {
     }
     // 直接读 CLI 自己的会话 transcript（单一真相源 = CLI 记忆，存本项目）
     const sessionId = getActiveSession(descriptor);
-    const history = sessionId ? readNodeTranscript(descriptor, sessionId) : [];
+    const history = sessionId ? await readNodeTranscript(descriptor, sessionId) : [];
     return { history, sessionId: sessionId ?? null };
   });
 
@@ -82,7 +82,7 @@ const agentsRoutes: FastifyPluginCallback = (app, _options, done) => {
       return reply.code(404).send({ error: `node not found: ${id}` });
     }
     const active = getActiveSession(descriptor);
-    return { activeSessionId: active ?? null, sessions: listNodeSessions(descriptor) };
+    return { activeSessionId: active ?? null, sessions: await listNodeSessions(descriptor) };
   });
 
   app.post('/api/agents/:id/sessions/activate', async (request, reply) => {
@@ -118,46 +118,83 @@ const agentsRoutes: FastifyPluginCallback = (app, _options, done) => {
   app.post('/api/agents/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
     const body = request.body as Record<string, unknown>;
-    // 补默认 cliHome（按 provider）
+    // 补默认 v2 storage（按 provider）
     const provider = typeof body.provider === 'string' ? body.provider : 'codex';
     const meta = PROVIDERS.find((p) => p.id === provider);
     const memoryHome = meta?.memoryHome ?? `.${provider}`;
     const descriptorDefaults = {
+      schemaVersion: 2 as const,
       cli: { command: meta?.command ?? provider },
-      prompt: { identity: `agents/${id}/identity.md` },
-      rules: { files: [`agents/${id}/rules/*.md`] },
-      memory: {
-        session: { resume: true, dir: `agents/${id}/sessions` },
-        cliHome: `agents/${id}/memory/${memoryHome}`,
+      storage: {
+        config: {
+          identityFile: `agents/${id}/config/identity.md`,
+          rulesFiles: [`agents/${id}/config/rules/*.md`],
+        },
+        runtime: {
+          activeSessionFile: `agents/${id}/runtime/active-session.json`,
+          resume: true,
+        },
+        data: { cliHome: `agents/${id}/data/cli/${memoryHome}` },
       },
+      ...(meta?.defaultModel ? { model: meta.defaultModel } : {}),
     };
-    const parsed = NodeDescriptorSchema.safeParse({ ...descriptorDefaults, ...body, id });
+    const bodyStorage = typeof body.storage === 'object' && body.storage !== null
+      ? body.storage as Record<string, unknown>
+      : {};
+    const bodyConfig = typeof bodyStorage.config === 'object' && bodyStorage.config !== null
+      ? bodyStorage.config as Record<string, unknown>
+      : {};
+    const bodyRuntime = typeof bodyStorage.runtime === 'object' && bodyStorage.runtime !== null
+      ? bodyStorage.runtime as Record<string, unknown>
+      : {};
+    const bodyData = typeof bodyStorage.data === 'object' && bodyStorage.data !== null
+      ? bodyStorage.data as Record<string, unknown>
+      : {};
+    const parsed = NodeDescriptorSchema.safeParse({
+      ...descriptorDefaults,
+      ...body,
+      id,
+      model: typeof body.model === 'string' && body.model.trim().length > 0
+        ? body.model.trim()
+        : meta?.defaultModel ?? '',
+      storage: {
+        ...descriptorDefaults.storage,
+        ...bodyStorage,
+        config: { ...descriptorDefaults.storage.config, ...bodyConfig },
+        runtime: { ...descriptorDefaults.storage.runtime, ...bodyRuntime },
+        data: { ...descriptorDefaults.storage.data, ...bodyData },
+      },
+    });
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid descriptor', issues: parsed.error.issues });
     }
     const isNew = !existsSync(join(getProjectRoot(), 'agents', `${id}.json`));
-    writeNodeDescriptor(id, parsed.data);
+    try {
+      writeNodeDescriptor(id, parsed.data);
+    } catch (error) {
+      return reply.code(400).send({
+        error: error instanceof Error ? error.message : 'invalid node storage paths',
+      });
+    }
 
-    // 新节点：脚手架目录 + 默认 identity/rules
+    // 新节点：脚手架 config；runtime/data 在首次使用时创建。
     if (isNew) {
       const root = getProjectRoot();
       const nodeDir = join(root, 'agents', id);
-      mkdirSync(join(nodeDir, 'rules'), { recursive: true });
-      mkdirSync(join(nodeDir, 'sessions'), { recursive: true });
-      const identityPath = parsed.data.prompt?.identity ?? `agents/${id}/identity.md`;
+      mkdirSync(join(nodeDir, 'config', 'rules'), { recursive: true });
+      const identityPath = parsed.data.storage.config.identityFile;
       const identityFull = resolve(root, identityPath);
       if (!existsSync(identityFull)) {
         writeFileSync(
           identityFull,
-          `# ${parsed.data.name} 节点身份\n\n你是 0AgentTeams 平台中的一个 Agent 节点，由 ${parsed.data.provider} CLI 驱动。\n\n## 你的能力\n- 你可以直接读写当前项目的源码文件（工作目录 = 项目根）。\n- 你能编辑 agents/${id}/ 下的 identity.md 与 rules/*.md 改变自己的行为。\n\n## 工作方式\n- 收到需求后先理解意图，再用工具落地。改动小而精准，改完简要说明。\n`,
+          `# ${parsed.data.name} 节点身份\n\n你是 0AgentTeams 平台中的一个 Agent 节点，由 ${parsed.data.provider} CLI 驱动。\n\n## 你的能力\n- 你可以直接读写当前项目的源码文件（工作目录 = 项目根）。\n- 你能编辑 agents/${id}/config/ 下的 identity.md 与 rules/*.md 改变自己的行为。\n\n## 工作方式\n- 收到需求后先理解意图，再用工具落地。改动小而精准，改完简要说明。\n`,
           'utf-8',
         );
       }
-      const rulesPath = join(nodeDir, 'rules', 'general.md');
+      const rulesPath = join(nodeDir, 'config', 'rules', 'general.md');
       if (!existsSync(rulesPath)) {
         writeFileSync(rulesPath, `# ${parsed.data.name} 通用规则\n\n## 沟通\n- 用中文回答，除非用户用其它语言提问。\n- 回答简洁直接。\n`, 'utf-8');
       }
-      writeFileSync(join(nodeDir, 'sessions', '.gitkeep'), '', 'utf-8');
     }
     return { status: 'ok', id, created: isNew };
   });
@@ -185,8 +222,7 @@ const agentsRoutes: FastifyPluginCallback = (app, _options, done) => {
     } catch {
       return reply.code(404).send({ error: `node not found: ${id}` });
     }
-    const identityPath = descriptor.prompt?.identity;
-    if (!identityPath) return reply.code(400).send({ error: 'node has no identity file' });
+    const identityPath = descriptor.storage.config.identityFile;
     const full = resolve(getProjectRoot(), identityPath);
     mkdirSync(resolve(full, '..'), { recursive: true });
     writeFileSync(full, content, 'utf-8');

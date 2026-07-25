@@ -1,15 +1,21 @@
-/**
- * NodeDescriptor —— 节点配置（数据，不是代码）
- * 存于 agents/<id>.json。加任意 CLI 节点 = 加一份 JSON + provider 类。
- * 借鉴 clowder-ai cat-catalog.json (breeds/variants) 模型。
- */
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+/** Node configuration stored in agents/<id>.json. */
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { getProjectRoot, resolvePathVars } from '../utils/project-root.js';
+import { migrateLegacyNodeLayout, normalizeLockedLegacyDescriptor } from './node-storage-migration.js';
 
 export const NodeDescriptorSchema = z.object({
-  id: z.string(),
+  schemaVersion: z.literal(2),
+  migrationPending: z.boolean().optional(),
+  id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'invalid node id'),
   name: z.string(),
   provider: z.string(),
   cli: z.object({
@@ -20,21 +26,20 @@ export const NodeDescriptorSchema = z.object({
     cwd: z.string().default('${PROJECT_ROOT}'),
   }),
   model: z.string().optional(),
-  prompt: z.object({ identity: z.string() }).optional(),
-  rules: z.object({ files: z.array(z.string()).default([]) }).optional(),
-  skills: z.object({ mcp: z.array(z.record(z.unknown())).default([]) }).optional(),
-  memory: z
-    .object({
-      session: z
-        .object({
-          resume: z.boolean().default(true),
-          dir: z.string(),
-        })
-        .optional(),
-      /** CLI 的 home 目录（项目内，per-node）。codex→CODEX_HOME，claude→CLAUDE_CONFIG_DIR */
+  storage: z.object({
+    config: z.object({
+      identityFile: z.string(),
+      rulesFiles: z.array(z.string()).default([]),
+    }),
+    runtime: z.object({
+      activeSessionFile: z.string(),
+      resume: z.boolean().default(true),
+    }),
+    data: z.object({
       cliHome: z.string().optional(),
-    })
-    .optional(),
+    }),
+  }),
+  skills: z.object({ mcp: z.array(z.record(z.unknown())).default([]) }).optional(),
 });
 
 export type NodeDescriptor = z.infer<typeof NodeDescriptorSchema>;
@@ -43,52 +48,126 @@ function agentsDir(): string {
   return join(getProjectRoot(), 'agents');
 }
 
-/** 读取一个节点配置 */
-export function readNodeDescriptor(id: string): NodeDescriptor {
-  const filePath = join(agentsDir(), `${id}.json`);
-  if (!existsSync(filePath)) {
-    throw new Error(`Node descriptor not found: ${filePath}`);
-  }
-  const raw = readFileSync(filePath, 'utf-8');
-  const parsed: unknown = JSON.parse(raw);
-  return NodeDescriptorSchema.parse(parsed);
+function descriptorFile(id: string): string {
+  return join(agentsDir(), `${id}.json`);
 }
 
-/** 写入一个节点配置（codex 自增/改节点走这） */
+function assertInside(label: string, root: string, path: string): void {
+  const target = resolve(getProjectRoot(), resolvePathVars(path));
+  const rel = relative(root, target);
+  if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) return;
+  throw new Error(`${label} must stay inside ${relative(getProjectRoot(), root)}: ${target}`);
+}
+
+export function assertNodeStorageOwnership(descriptor: NodeDescriptor): void {
+  const nodeRoot = resolve(getProjectRoot(), 'agents', descriptor.id);
+  if (descriptor.migrationPending) {
+    assertInside('identityFile', nodeRoot, descriptor.storage.config.identityFile);
+    for (const file of descriptor.storage.config.rulesFiles) assertInside('rulesFiles', nodeRoot, file);
+    assertInside('activeSessionFile', nodeRoot, descriptor.storage.runtime.activeSessionFile);
+    if (descriptor.storage.data.cliHome) assertInside('cliHome', nodeRoot, descriptor.storage.data.cliHome);
+    return;
+  }
+  const configRoot = join(nodeRoot, 'config');
+  const runtimeRoot = join(nodeRoot, 'runtime');
+  const cliRoot = join(nodeRoot, 'data', 'cli');
+  assertInside('identityFile', configRoot, descriptor.storage.config.identityFile);
+  for (const file of descriptor.storage.config.rulesFiles) assertInside('rulesFiles', configRoot, file);
+  assertInside('activeSessionFile', runtimeRoot, descriptor.storage.runtime.activeSessionFile);
+  if (descriptor.storage.data.cliHome) assertInside('cliHome', cliRoot, descriptor.storage.data.cliHome);
+}
+
+function parseDescriptor(id: string, raw: unknown): NodeDescriptor {
+  const descriptor = NodeDescriptorSchema.parse(raw);
+  if (descriptor.id !== id) {
+    throw new Error(`Node descriptor id mismatch: expected ${id}, got ${descriptor.id}`);
+  }
+  assertNodeStorageOwnership(descriptor);
+  return descriptor;
+}
+
+/** Read a v2 descriptor. Startup migration runs before application routes are registered. */
+export function readNodeDescriptor(id: string): NodeDescriptor {
+  const filePath = descriptorFile(id);
+  if (!existsSync(filePath)) throw new Error(`Node descriptor not found: ${filePath}`);
+  const raw: unknown = JSON.parse(readFileSync(filePath, 'utf-8'));
+  const parsed = NodeDescriptorSchema.safeParse(raw);
+  if (parsed.success) return parseDescriptor(id, parsed.data);
+  try {
+    return parseDescriptor(id, migrateLegacyNodeLayout(id, raw));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EPERM' && code !== 'EBUSY') throw error;
+    console.warn(`[storage] node ${id} is using its legacy CLI home; migration will retry later`);
+    return parseDescriptor(id, normalizeLockedLegacyDescriptor(id, raw));
+  }
+}
+
+/** Atomically write a validated descriptor. */
 export function writeNodeDescriptor(id: string, descriptor: NodeDescriptor): void {
+  const parsed = NodeDescriptorSchema.parse(descriptor);
+  if (parsed.id !== id) throw new Error(`Node descriptor id mismatch: expected ${id}, got ${parsed.id}`);
+  assertNodeStorageOwnership(parsed);
   const dir = agentsDir();
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const filePath = join(dir, `${id}.json`);
-  writeFileSync(filePath, JSON.stringify(descriptor, null, 2) + '\n', 'utf-8');
+  const filePath = descriptorFile(id);
+  const tempPath = `${filePath}.tmp`;
+  writeFileSync(tempPath, `${JSON.stringify(parsed, null, 2)}\n`, 'utf-8');
+  renameSync(tempPath, filePath);
 }
 
-/** 列出所有节点 id */
+/** List v2 descriptors. */
 export function listNodeDescriptors(): NodeDescriptor[] {
   const dir = agentsDir();
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
-    .filter((f) => f.endsWith('.json') && f !== 'graph.json')
-    .map((f) => {
-      const raw = readFileSync(join(dir, f), 'utf-8');
-      return NodeDescriptorSchema.parse(JSON.parse(raw));
+    .filter((file) => file.endsWith('.json') && file !== 'graph.json')
+    .flatMap((file) => {
+      try {
+        return [readNodeDescriptor(file.slice(0, -'.json'.length))];
+      } catch (error) {
+        console.error(`[storage] node unavailable: ${file}:`, error);
+        return [];
+      }
     });
 }
 
-/** 解析节点配置里的 ${PROJECT_ROOT} 等路径变量 */
+/** Run startup migration for every descriptor. */
+export function migrateAllNodeStorageLayouts(): string[] {
+  const dir = agentsDir();
+  if (!existsSync(dir)) return [];
+  const failures: string[] = [];
+  for (const file of readdirSync(dir).filter((name) => name.endsWith('.json') && name !== 'graph.json')) {
+    const id = file.slice(0, -'.json'.length);
+    try {
+      const raw: unknown = JSON.parse(readFileSync(join(dir, file), 'utf-8'));
+      parseDescriptor(id, migrateLegacyNodeLayout(id, raw));
+    } catch (error) {
+      failures.push(`${id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return failures;
+}
+
+/** Resolve path variables without changing the descriptor's storage ownership. */
 export function resolveDescriptorPaths(descriptor: NodeDescriptor): NodeDescriptor {
   return {
     ...descriptor,
-    cli: {
-      ...descriptor.cli,
-      cwd: resolvePathVars(descriptor.cli.cwd),
-    },
-    memory: descriptor.memory && {
-      ...descriptor.memory,
-      session: descriptor.memory.session && {
-        ...descriptor.memory.session,
-        dir: resolvePathVars(descriptor.memory.session.dir),
+    cli: { ...descriptor.cli, cwd: resolvePathVars(descriptor.cli.cwd) },
+    storage: {
+      config: {
+        identityFile: resolvePathVars(descriptor.storage.config.identityFile),
+        rulesFiles: descriptor.storage.config.rulesFiles.map(resolvePathVars),
       },
-      ...(descriptor.memory.cliHome ? { cliHome: resolvePathVars(descriptor.memory.cliHome) } : {}),
+      runtime: {
+        ...descriptor.storage.runtime,
+        activeSessionFile: resolvePathVars(descriptor.storage.runtime.activeSessionFile),
+      },
+      data: {
+        ...(descriptor.storage.data.cliHome
+          ? { cliHome: resolvePathVars(descriptor.storage.data.cliHome) }
+          : {}),
+      },
     },
   };
 }

@@ -10,7 +10,7 @@ import type { CliSpawnOptions } from '../../utils/cli-types.js';
 import type { AgentService, AgentServiceOptions } from '../AgentService.js';
 import type { AgentMessage, MessageMetadata, NodeId } from '../types.js';
 import type { NodeDescriptor } from '../NodeDescriptor.js';
-import { ensureOpencodeHome, opencodeXdgEnv, resolveOpencodeHome } from '../opencode-home.js';
+import { ensureOpencodeHome, opencodeXdgEnv, resolveOpencodeHome, resolveOpencodeInvocation, writeOpencodeConfig } from '../opencode-home.js';
 import { transformOpenCodeEvent } from './opencode-event-transform.js';
 
 export class OpenCodeAgentService implements AgentService {
@@ -34,6 +34,7 @@ export class OpenCodeAgentService implements AgentService {
     // per-node 项目内 opencode home（经 XDG 重定向，DB/sessions/skills 全落项目）
     const opencodeHome = resolveOpencodeHome(this.descriptor);
     ensureOpencodeHome(opencodeHome);
+    writeOpencodeConfig(this.descriptor, opencodeHome);
 
     const args: string[] = [
       'run',
@@ -44,8 +45,10 @@ export class OpenCodeAgentService implements AgentService {
       ...this.descriptor.cli.extraArgs,
     ];
 
+    const invocation = resolveOpencodeInvocation(this.descriptor.cli.command);
     const spawnOpts: CliSpawnOptions = {
-      command: this.descriptor.cli.command,
+      command: invocation.command,
+      shell: invocation.shell,
       args,
       cwd,
       stdinInput: prompt,
@@ -58,13 +61,11 @@ export class OpenCodeAgentService implements AgentService {
     try {
       for await (const event of spawnCli(spawnOpts)) {
         if (isCliTimeout(event)) {
-          terminalYielded = true;
           yield { type: 'error', nodeId: this.nodeId, error: `opencode CLI 响应超时 (${Math.round(event.timeoutMs / 1000)}s)`, metadata, timestamp: Date.now() };
           yield { type: 'done', nodeId: this.nodeId, metadata, timestamp: Date.now() };
           return;
         }
         if (isCliError(event)) {
-          terminalYielded = true;
           yield { type: 'error', nodeId: this.nodeId, error: `opencode CLI 异常退出 (code: ${event.exitCode ?? 'null'})`, metadata, timestamp: Date.now() };
           yield { type: 'done', nodeId: this.nodeId, metadata, timestamp: Date.now() };
           return;

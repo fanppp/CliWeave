@@ -13,15 +13,17 @@ export interface ProviderMeta {
   id: string;
   name: string;
   command: string;
-  /** 默认 memory home 子目录名（agents/<id>/memory/<this>） */
+  /** 默认 CLI home 子目录名（agents/<id>/data/cli/<this>） */
   memoryHome: string;
+  /** Optional known-good default for providers that cannot reliably auto-select a model. */
+  defaultModel?: string;
   installed: boolean;
 }
 
 export const PROVIDERS: ProviderMeta[] = [
   { id: 'codex', name: 'Codex (OpenAI)', command: 'codex', memoryHome: '.codex', installed: true },
   { id: 'claude', name: 'Claude Code', command: 'claude', memoryHome: '.claude', installed: true },
-  { id: 'opencode', name: 'OpenCode', command: 'opencode', memoryHome: '.opencode', installed: true },
+  { id: 'opencode', name: 'OpenCode', command: 'opencode', memoryHome: '.opencode', defaultModel: 'alibaba-cn/glm-5.2', installed: true },
   { id: 'gemini', name: 'Gemini CLI', command: 'gemini', memoryHome: '.gemini', installed: false },
 ];
 

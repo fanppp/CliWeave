@@ -24,12 +24,13 @@
 
 ## Phase 2 — 多 provider + 显式静态图
 
-- [x] 2.1 多 provider：codex/claude/opencode/gemini 四个 AgentService 实现 + 各自事件转换 + 注册表
+- [x] 2.1 已安装 provider：codex/claude/opencode AgentService + 事件转换 + 项目内记忆
+- [ ] 2.1b Gemini provider：当前仅代码 stub，本机未安装，不计入已实现范围
 - [x] 2.2 web 加/删/选节点：POST 脚手架建目录+默认 identity/rules + DELETE + GET providers + NodeSelector/新节点表单
 - [ ] 2.3 Graph 画布（@xyflow/react 增删节点/连线/拖动）→ 存 graph.json
 - [ ] 2.4 AgentRouter（读 graph.json 边拓扑串/并行调度）
 
-**状态: 进行中（2.1 完成）**
+**状态: 进行中（已安装的三个 provider 完成；Gemini 待未来按存储契约接入）**
 
 ## Phase 3 — per-node 深度
 
@@ -56,15 +57,17 @@
 - [2026-07-24] 1.11 - 会话流控: messages 路由调用结束广播 done + 防并发发送 + ChatInput 忙闲状态指示 + chatStore done/session_init 后刷新历史/会话列表。git 初始化并提交(e36bd1e + 1ff353d)。
 - [2026-07-24] 2.1 - 多 provider 完成：新增 ClaudeAgentService(claude -p --output-format stream-json --verbose --dangerously-skip-permissions，项目内 CLAUDE_CONFIG_DIR + 凭证 copy-on-missing + claude-transcript 读 projects/\<hash\>/\<sid\>.jsonl，实测 hello+历史2条)、OpenCodeAgentService(opencode run --format json，位置参数 prompt，实测 sessionInit+hello)、GeminiAgentService(按 clowder-ai 文档 best-effort，gemini 未装待测)。transcript-router 按 provider 调度 read/list。注册表 registerAllProviders 注册四个。新增 claude-node + opencode-node 节点配置。加新 CLI = provider 类+事件转换+注册一行+可选 transcript reader。
 - [2026-07-24] 2.2 - web 加/删/选节点：POST /api/agents/:id 改为脚手架建目录+默认 identity/rules/sessions（按 provider 补默认 cliHome）+ isNew 检测；新增 DELETE /api/agents/:id（删 JSON+目录）；GET /api/agents/providers 返回四 provider 元数据(installed 标记)。web：NodeSelector(下拉切换节点+刷新历史)、AddNodeModal(选 provider+填 id/name/model→POST→切换)、删除按钮。实测：建 test-node 脚手架生成 identity/rules/sessions，DELETE 清除干净。
-- [2026-07-25] 2.2 改 - opencode 历史修复：opencode 会话存全局 SQLite(~/.local/share/opencode/opencode.db)非文件，故用 `opencode export <sid>` 子进程读 JSON→解析 messages[].info.role+parts[].text 成 HistoryEntry(剥 L0 前缀)。transcript-router 加 opencode case。实测 opencode-node 历史 count=6 全读出。注意：opencode 记忆不落项目(全局DB，CLI 本身限制)，active.json 仍记 sessionId；codex/claude 记忆在项目内。sessions 列表对 opencode 暂返回 [](opencode session list 格式待适配)。
+- [2026-07-25] 2.2 改 - opencode 历史读取改为对项目内 XDG SQLite 调用 `opencode export <sid>`；`active.json` 只保存 sessionId。会话列表使用 `opencode session list --format json`，不再把默认 table 输出误当 JSON。
+- [2026-07-25] 2.2 存储闭环 - Codex/Claude/OpenCode 的 CLI home 增加节点目录越界保护，三者的 tmp 均落节点 memory；OpenCode 补齐 XDG_STATE_HOME。增加只复制的 dry-run/apply 迁移工具。Gemini 未安装，仅保留 stub 并由 `docs/CLI_STORAGE.md` 约束后续接入。
+- [2026-07-25] 节点存储 v2 - 节点统一为 `config/`、`runtime/`、`data/cli/`，启动时自动迁移旧布局；共享数据预留 `shared/project` 和 `shared/teams/<team-id>` 两级 scope，但暂不启用读写。
+- [2026-07-25] 2.2 Windows 进程修复 - OpenCode 不再经 `shell:true`/npm cmd shim 启动，改为解析并直接 spawn 原生 `opencode.exe`，修复 cmd 提前 code 1、原生进程残留和 snapshot index.lock 冲突。
 
-## 🔴 未解决问题（2026-07-25）
+## 已解决问题（2026-07-25）
 
-### opencode 经 API 调用失败
-- **症状**：POST /api/messages 到 opencode-node 返回 202，但后台 invoke 不产出 session_init（active.json 留空 `{}`），history count=0，messages 路由 catch 未触发（无错误日志）。
-- **已排除**：codex/claude 经同一 API + spawnCli(shell:true) 正常 → spawn 通路本身没坏；opencode 命令本身可用（手动 `opencode run --format json "say hi"` 带 XDG env 能返回 + 落项目 DB）。
-- **已尝试均失败**：位置参数 prompt / stdin prompt / L0 前置 / instructions 配置(OPENCODE_CONFIG，会卡死) / 唯一分隔符。其中 OPENCODE_CONFIG + permission 块会导致 opencode 120s 卡死。
-- **待查方向**：① spawnCli 对 opencode 的 env 合并({ ...process.env, XDG... })是否有问题；② opencode 在 shell:true(cmd.exe) 下与直接 PowerShell 调用行为差异；③ 加 spawnCli stderr 透传日志看 opencode 启动报错。codex/claude 已满足"记忆在项目"，opencode 暂搁置等专门排查。
+### opencode 项目内存储与会话列表
+- API invoke 已能在项目内 `.opencode/data/opencode/opencode.db` 创建并恢复 session。
+- 原问题包含两部分：旧节点 descriptor 缺少显式 `cliHome`；session list 未传 `--format json`，解析默认 table 后返回空列表。
+- OpenCode 1.18.4 的 `debug paths` 证明 data/config/cache 可由现有三个 XDG 变量重定向；本次再补 `XDG_STATE_HOME` 和项目内 tmp，消除剩余 C 盘写入路径。
 
 ## 全部 Gap（对照最终目标：任意 CLI 节点 + 每节点 memory/skills/rules + web 加节点可拖动）
 
@@ -72,8 +75,8 @@
 |------|------|------|
 | codex provider（记忆/sessions/skills 全在项目） | CODEX_HOME 项目内 + transcript + resume | ✅ |
 | claude provider（记忆/sessions 在项目） | CLAUDE_CONFIG_DIR 项目内 + transcript + resume | ✅ |
-| opencode provider | XDG 重定向存储可落项目(手动验证)，但经 API invoke 失败 | 🔴 阻塞 |
-| gemini provider | 按 clowder-ai 文档实现，本机未装 | ⚠️ 待测 |
+| opencode provider | 项目内 XDG data/config/cache/state/tmp + SQLite transcript + resume/list | ✅ |
+| gemini provider | 仅 provider stub，本机未安装；接入规则见 CLI_STORAGE.md | ⚪ 未实现 |
 | per-node rules/identity 注入 | codex/claude 走 L0(developer_instructions/append-system-prompt)；opencode instructions 配置会卡死 | ⚠️ opencode 待解 |
 | per-node skills/MCP 注入 | descriptor.skills.mcp 空，无注入 | ❌ Phase 3 |
 | web 加/删/选节点 | NodeSelector + AddNodeModal + DELETE + 脚手架 | ✅ |
@@ -82,7 +85,7 @@
 | 节点间通信（A.done→B.prompt） | 无 | ❌ 2.4 |
 | worktree 隔离（每节点独立工作树） | 各节点共享项目根 cwd，无隔离 | ❌ Phase 3（clowder-ai 用 git worktree） |
 
-下一步优先级：① 修 opencode API invoke（当前阻塞）② Graph 画布 + 拖动 ③ AgentRouter 多节点调度 ④ per-node skills/MCP。
+下一步优先级：① Graph 画布 + 拖动 ② AgentRouter 多节点调度 ③ per-node skills/MCP。
 
 ## 差距评估（2026-07-24，对照最终目标）
 
@@ -90,15 +93,15 @@
 
 | 维度 | 现状 | 差距 |
 |------|------|------|
-| 任意 CLI 节点 | ✅ codex/claude/opencode/gemini 四 provider 全实现 | ✅（gemini 未装待测，其余实测通过） |
-| 可选哪个 CLI 建 | ✅ web 新节点表单选 provider（codex/claude/opencode/gemini） | ✅ |
+| 任意 CLI 节点 | codex/claude/opencode 已实现；Gemini 仅 stub | ⚠️ 新 provider 须按 CLI_STORAGE.md 验收 |
+| 可选哪个 CLI 建 | web 表单展示 provider 元数据，Gemini 标记未安装 | ✅ |
 | 即插即用/即删即弃 | ✅ POST 脚手架建 + DELETE 删 + web UI | ✅ |
 | web 加节点 | ✅ NodeSelector + AddNodeModal | ✅ |
 | 拖动节点（react-flow）| ❌ | 2.3 |
 | AgentRouter 多节点调度 | ❌ | 2.4 |
 | per-node skills/MCP | ❌ | Phase 3 |
 
-下一步优先级：① 多 provider（claude/opencode/gemini）② web 加/删节点 ③ Graph 画布 @xyflow/react ④ AgentRouter ⑤ per-node skills/MCP。
+下一步优先级：① Graph 画布 @xyflow/react ② AgentRouter ③ per-node skills/MCP；Gemini 等本机安装后再按 CLI_STORAGE.md 接入。
 骨架（注册表 + NodeDescriptor 数据驱动）已铺好，全是加法不重写。
 
 ## 文档更新纪律

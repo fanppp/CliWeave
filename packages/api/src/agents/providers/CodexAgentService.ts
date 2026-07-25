@@ -17,7 +17,7 @@ import type { CliSpawnOptions } from '../../utils/cli-types.js';
 import type { AgentService, AgentServiceOptions } from '../AgentService.js';
 import type { AgentMessage, MessageMetadata, NodeId } from '../types.js';
 import type { NodeDescriptor } from '../NodeDescriptor.js';
-import { ensureCodexHome, resolveCodexHome } from '../codex-home.js';
+import { codexEnv, ensureCodexHome, resolveCodexHome } from '../codex-home.js';
 import { transformCodexEvent } from './codex-event-transform.js';
 
 /** TOML 字符串转义：-c 的 value 部分按 TOML 解析，需引号+转义 */
@@ -97,7 +97,7 @@ export class CodexAgentService implements AgentService {
       args,
       cwd,
       stdinInput: prompt,
-      env: { CODEX_HOME: codexHome },
+      env: codexEnv(codexHome),
       ...(options?.signal ? { signal: options.signal } : {}),
       ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
     };

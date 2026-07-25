@@ -5,14 +5,14 @@
  *   claude -p --output-format stream-json --verbose --dangerously-skip-permissions \
  *         [--model <m>] [--append-system-prompt "<L0>"] [--resume <sid>]
  *   prompt 经 stdin 传入。
- *   记忆/会话存项目内 CLAUDE_CONFIG_DIR=agents/<node>/memory/.claude。
+ *   记忆/会话存项目内 CLAUDE_CONFIG_DIR=agents/<node>/data/cli/.claude。
  */
 import { spawnCli, isCliError, isCliTimeout } from '../../utils/cli-spawn.js';
 import type { CliSpawnOptions } from '../../utils/cli-types.js';
 import type { AgentService, AgentServiceOptions } from '../AgentService.js';
 import type { AgentMessage, MessageMetadata, NodeId } from '../types.js';
 import type { NodeDescriptor } from '../NodeDescriptor.js';
-import { ensureClaudeHome, resolveClaudeHome } from '../claude-home.js';
+import { claudeEnv, ensureClaudeHome, resolveClaudeHome } from '../claude-home.js';
 import { transformClaudeEvent } from './claude-event-transform.js';
 
 export class ClaudeAgentService implements AgentService {
@@ -54,7 +54,7 @@ export class ClaudeAgentService implements AgentService {
       args,
       cwd,
       stdinInput: prompt,
-      env: { CLAUDE_CONFIG_DIR: claudeHome },
+      env: claudeEnv(claudeHome),
       ...(options?.signal ? { signal: options.signal } : {}),
       ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
     };

@@ -22,8 +22,8 @@ export function compileL0(descriptor: NodeDescriptor): string | undefined {
   const parts: string[] = [];
 
   // 1. identity
-  if (resolved.prompt?.identity) {
-    const identityPath = resolve(root, resolved.prompt.identity);
+  if (resolved.storage.config.identityFile) {
+    const identityPath = resolve(root, resolved.storage.config.identityFile);
     try {
       const identity = readFileSync(identityPath, 'utf-8').trim();
       if (identity) parts.push(identity);
@@ -33,7 +33,7 @@ export function compileL0(descriptor: NodeDescriptor): string | undefined {
   }
 
   // 2. rules
-  const rulesFiles = resolved.rules?.files ?? [];
+  const rulesFiles = resolved.storage.config.rulesFiles;
   const ruleContents: string[] = [];
   for (const pattern of rulesFiles) {
     for (const file of resolveGlob(pattern, root)) {

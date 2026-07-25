@@ -8,7 +8,9 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx --test src/agents/cli-storage.test.ts",
+    "migrate:cli-memory": "tsx src/scripts/migrate-cli-memory.ts"
   },
   "dependencies": {
     "@fastify/cors": "^9.0.0",

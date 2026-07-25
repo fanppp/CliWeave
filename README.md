@@ -1,7 +1,9 @@
 # 0AgentTeams
 
 可配置多 CLI Agent 节点 + Graph 编排的协作平台。每个节点 = 一个 CLI 工具
-（codex / claude / opencode / gemini…），自带 memory / skills / rules / prompt。
+（当前已验证 codex / claude / opencode；gemini 仅保留未安装 stub），自带私有 CLI 数据、skills、rules 和 prompt。
+
+CLI 节点的配置、平台运行状态和 CLI 原生数据分别保存在 `config/`、`runtime/`、`data/cli/`，详细约束见 [`docs/CLI_STORAGE.md`](docs/CLI_STORAGE.md)。
 网页可向节点发消息、实时显示流式回复；节点（如 codex）能直接改写项目自身。
 
 ## 快速开始

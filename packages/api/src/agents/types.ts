@@ -6,6 +6,14 @@
 
 export type NodeId = string;
 
+export interface HistoryEntry {
+  role: 'user' | 'agent';
+  content: string;
+  type?: string;
+  toolName?: string;
+  timestamp: number;
+}
+
 export interface MessageMetadata {
   provider?: string;
   model?: string;
