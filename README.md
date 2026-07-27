@@ -1,9 +1,9 @@
-# cliograph
+# CliWeave
 
 > 可插拔多 CLI Agent 节点 + Graph 画布协作平台。
 > 把 codex / claude / opencode 等 CLI 工具变成画布上的节点，连线成拓扑，按拓扑序串行协作（A 的输出 → B 的输入）。
 
-名字取自 **cli** + **graph**：用 CLI 作为节点，在画布上织成一张协作图。
+名字取自 **cli** + **weave**：用 CLI 作为节点，在画布上织成一张协作图。
 
 每个节点 = 一个 CLI 工具实例，自带**项目内私有 CLI 数据**（session / 记忆 / auth）、**身份 identity**、**规则 rules** 和 **prompt 注入**。在网页画布上增删节点、连线、运行，节点间按拓扑结构相互通信。
 
