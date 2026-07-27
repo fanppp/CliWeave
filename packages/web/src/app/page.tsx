@@ -8,6 +8,7 @@ import { GraphRunStream } from '@/components/GraphRunStream';
 import { MessageStream } from '@/components/MessageStream';
 import { NodeConfigPanel } from '@/components/NodeConfigPanel';
 import { NodeSelector } from '@/components/NodeSelector';
+import { ProjectPicker } from '@/components/ProjectPicker';
 import { RunPicker } from '@/components/RunPicker';
 import { SessionPicker } from '@/components/SessionPicker';
 import { HSplit, VSplit } from '@/components/Splitter';
@@ -78,6 +79,7 @@ export default function Home() {
           </div>
           {mode === 'node' && <NodeSelector />}
           {mode === 'node' && <SessionPicker />}
+          <ProjectPicker />
           <span style={styles.status}>
             WebSocket:{' '}
             <strong style={{ color: connected ? 'var(--success)' : 'var(--danger)' }}>

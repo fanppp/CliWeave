@@ -174,9 +174,10 @@ function toFlowEdges(graph: Graph | null, backIds: Set<string>): FlowEdge[] {
 
 export function GraphCanvas() {
   const graph = useGraphRunStore((s) => s.graph);
-  const loadGraph = useGraphRunStore((s) => s.loadGraph);
   const saveGraph = useGraphRunStore((s) => s.saveGraph);
   const saveError = useGraphRunStore((s) => s.saveError);
+  const projectId = useGraphRunStore((s) => s.projectId);
+  const loadProjectGraph = useGraphRunStore((s) => s.loadProjectGraph);
   const selectedGraphNodeId = useGraphRunStore((s) => s.selectedGraphNodeId);
   const setSelectedGraphNodeId = useGraphRunStore((s) => s.setSelectedGraphNodeId);
   const setSelectedAgentNodeKey = useGraphRunStore((s) => s.setSelectedAgentNodeKey);
@@ -188,30 +189,28 @@ export function GraphCanvas() {
   const [picker, setPicker] = useState(false);
   const [selEdge, setSelEdge] = useState<FlowEdge | null>(null);
   const skipCommit = useRef(true);
-  // 仅结构变更（增删/移动/连边）才提交；纯选中不触发 save（否则 save 回环重建边会丢选中）
   const dirtyRef = useRef(false);
 
-  // 回边集（随 nodes/edges 变化重算，用于边样式 + 面板标签）
   const backIds = useMemo(() => computeBackEdgeIds(nodes, edges), [nodes, edges]);
 
+  // 切画布 / 首次：拉该画布的图（store.loadProjectGraph 按 projectId）
   useEffect(() => {
-    if (graph) return;
-    fetch(`${API_URL}/api/graph`).then((r) => (r.ok ? r.json() : null)).then((g: Graph | null) => {
-      if (g) { loadGraph(g); setNodes(toFlowNodes(g, agentNameMap)); }
-    }).catch(() => undefined);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    void loadProjectGraph();
+  }, [projectId, loadProjectGraph]);
 
-  // graph 加载后同步边（带回边样式）
+  // graph / agentNameMap 变化 → 同步 nodes + edges（带回边样式 + 节点 label）
   useEffect(() => {
     const bid = computeBackEdgeIds(graph?.nodes ?? [], (graph?.edges ?? []) as unknown as FlowEdge[]);
     setEdges(toFlowEdges(graph, bid));
+    if (graph) setNodes(toFlowNodes(graph, agentNameMap));
+    skipCommit.current = true; // 程序化重置不触发 commit
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph]);
+  }, [graph, agentNameMap]);
 
+  // 拉该画布的节点实例列表（供"+加入节点"）
   useEffect(() => {
-    fetch(`${API_URL}/api/agents`).then((r) => (r.ok ? r.json() : [])).then((list: AgentMeta[]) => setAgents(Array.isArray(list) ? list : [])).catch(() => setAgents([]));
-  }, []);
+    fetch(`${API_URL}/api/projects/${projectId}/nodes`).then((r) => (r.ok ? r.json() : { nodes: [] })).then((data: { nodes: AgentMeta[] }) => setAgents(Array.isArray(data.nodes) ? data.nodes : [])).catch(() => setAgents([]));
+  }, [projectId]);
 
   const commit = useCallback((ns: Node[], es: FlowEdge[]) => {
     if (skipCommit.current) return;

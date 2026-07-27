@@ -65,6 +65,8 @@ interface GraphRunState {
   /** 每个节点的迭代轮次（node_iteration 更新，画布角标用） */
   nodeIterations: Record<string, number>;
   currentRunId: string | null;
+  /** 当前画布 id（默认 'default'）；切换画布会重载 graph/agents/runs */
+  projectId: string;
   /** 画布上选中的 agent 节点（用于右侧编辑 identity/rules） */
   selectedAgentNodeKey: string | null;
   /** 画布上选中的图节点 id（用于 GraphRunStream 过滤显示该节点流） */
@@ -78,6 +80,8 @@ interface GraphRunState {
   loadGraph: (g: Graph) => void;
   setGraph: (g: Graph) => void;
   saveGraph: (g: Graph) => Promise<void>;
+  setProjectId: (id: string) => void;
+  loadProjectGraph: () => Promise<void>;
   setReplayGraph: (g: Graph | null) => void;
   setSelectedAgentNodeKey: (key: string | null) => void;
   setSelectedGraphNodeId: (id: string | null) => void;
@@ -108,6 +112,7 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
   activeNodeIds: [],
   nodeIterations: {},
   currentRunId: null,
+  projectId: 'default',
   selectedAgentNodeKey: null,
   selectedGraphNodeId: null,
   agentNameMap: {},
@@ -115,10 +120,21 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
   saveError: null,
   loadGraph: (g) => set({ graph: g }),
   setGraph: (g) => set({ graph: g }),
+  setProjectId: (id) => set({ projectId: id, graph: null, bubbles: [], status: 'idle', activeNodeIds: [], nodeIterations: {}, currentRunId: null, selectedAgentNodeKey: null, selectedGraphNodeId: null, replayGraph: null }),
+  loadProjectGraph: async () => {
+    const pid = get().projectId;
+    try {
+      const res = await fetch(`${API_URL}/api/projects/${pid}/graph`);
+      if (res.ok) set({ graph: await res.json() });
+    } catch {
+      // 忽略；GraphCanvas 兜底
+    }
+  },
   saveGraph: async (g) => {
+    const pid = get().projectId;
     set({ graph: g, saveError: null }); // 乐观更新
     try {
-      const res = await fetch(`${API_URL}/api/graph`, {
+      const res = await fetch(`${API_URL}/api/projects/${pid}/graph`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(g),
@@ -128,7 +144,7 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
         const msg = body.error ?? `保存失败 HTTP ${res.status}`;
         set({ saveError: msg });
         // eslint-disable-next-line no-console
-        console.error('[saveGraph] PUT 400:', msg, '\ngraph=', g);
+        console.error('[saveGraph] PUT', res.status, ':', msg, '\ngraph=', g);
       }
     } catch (e) {
       set({ saveError: (e as Error).message });
@@ -143,9 +159,10 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
   reset: () => set({ bubbles: [], status: 'idle', activeNodeIds: [], nodeIterations: {}, currentRunId: null, replayGraph: null }),
   startRun: async (prompt: string) => {
     const socket = get().socket;
+    const pid = get().projectId;
     if (!socket || !socket.connected) throw new Error('WebSocket 未连接');
     get().reset();
-    const createRes = await fetch(`${API_URL}/api/graph/run`, {
+    const createRes = await fetch(`${API_URL}/api/projects/${pid}/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt }),
@@ -160,7 +177,7 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
         else resolve();
       });
     });
-    const startRes = await fetch(`${API_URL}/api/graph/run/${runId}/start`, {
+    const startRes = await fetch(`${API_URL}/api/projects/${pid}/run/${runId}/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: '{}',
@@ -169,8 +186,9 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
   },
   abortRun: async () => {
     const runId = get().currentRunId;
+    const pid = get().projectId;
     if (!runId) return;
-    await fetch(`${API_URL}/api/graph/run/${runId}/abort`, { method: 'POST' });
+    await fetch(`${API_URL}/api/projects/${pid}/run/${runId}/abort`, { method: 'POST' });
   },
   pushEvent: (event) =>
     set((s) => {
