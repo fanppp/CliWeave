@@ -9,7 +9,7 @@
  */
 import type { FastifyInstance, FastifyPluginCallback } from 'fastify';
 import { executeGraph } from '../agents/graph/AgentRouter.js';
-import { GraphSchema, GraphValidationError, readGraph, validateGraph, validateRunnable, writeGraph } from '../agents/graph/graph.js';
+import { GraphV3Schema, GraphValidationError, readGraph, validateGraph, validateRunnable, writeGraph } from '../agents/graph/graph.js';
 import type { Graph } from '../agents/graph/graph.js';
 import { closeRunStream, listRuns, readRun, recordRunEvent, recordRunStart } from '../agents/graph/graph-run-store.js';
 import { readNodeDescriptor } from '../agents/NodeDescriptor.js';
@@ -48,7 +48,7 @@ const graphRoutes: FastifyPluginCallback<GraphRouteOptions> = (app, options, don
   app.put('/api/graph', async (request, reply) => {
     let graph: Graph;
     try {
-      graph = GraphSchema.parse(request.body);
+      graph = GraphV3Schema.parse(request.body);
       validateGraph(graph);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'invalid graph';

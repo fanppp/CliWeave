@@ -74,3 +74,17 @@ input {
   animation: agent-node-glow 1.2s ease-in-out infinite;
   border-color: var(--success) !important;
 }
+
+/* xyflow：节点主体用 default 光标（仍可拖动），减少 grab 小手与选中/点边的冲突 */
+.react-flow__node { cursor: default !important; }
+.react-flow__node.selectable:focus { cursor: default !important; }
+.react-flow__edge-path { cursor: pointer; }
+/* 选中边：加粗 + 发光，并互斥节点焦点 */
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke-width: 4 !important;
+  filter: drop-shadow(0 0 8px var(--accent));
+}
+.react-flow__edge.selected .react-flow__edge-text {
+  fill: var(--accent) !important;
+  font-weight: 700;
+}

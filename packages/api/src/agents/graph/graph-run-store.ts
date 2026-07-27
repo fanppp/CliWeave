@@ -25,7 +25,8 @@ export interface RunMeta {
   runId: string;
   prompt: string;
   createdAt: number;
-  nodes: { id: string; type: 'input' | 'agent'; agentNodeKey?: string }[];
+  /** 完整 graph 快照（含 end/role/when/maxIterations/edge.id），重放时按快照配节点 label/配色/迭代。 */
+  graph: Graph;
 }
 
 export interface RunSummary {
@@ -46,18 +47,14 @@ function getStream(runId: string): WriteStream {
   return stream;
 }
 
-/** 运行开始：写 run_meta 首行（快照图结构）。 */
+/** 运行开始：写 run_meta 首行（完整 graph 快照）。 */
 export function recordRunStart(runId: string, prompt: string, graph: Graph): void {
   const meta: RunMeta = {
     type: 'run_meta',
     runId,
     prompt,
     createdAt: Date.now(),
-    nodes: graph.nodes.map((n) =>
-      n.type === 'input'
-        ? { id: n.id, type: 'input' }
-        : { id: n.id, type: 'agent', agentNodeKey: n.agentNodeKey },
-    ),
+    graph,
   };
   getStream(runId).write(JSON.stringify(meta) + '\n');
 }

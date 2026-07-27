@@ -229,7 +229,7 @@ const tabBtnActiveStyle: React.CSSProperties = {
   color: 'var(--text-strong)',
   background: 'var(--accent)',
   fontWeight: 600,
-  borderColor: 'var(--accent)',
+  border: '1px solid var(--accent)',
 };
 const backBtnStyle: React.CSSProperties = {
   marginLeft: 'auto',

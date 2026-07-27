@@ -1,78 +1,46 @@
 /**
- * AgentRouter —— 图运行时
- * 从 input 节点起按拓扑序串行执行 agent 节点；上游最终输出（过滤 [notice]）+ 原始需求作为下游 prompt。
+ * AgentRouter —— 图运行时（M4a-simplified：纯方向驱动）
  *
- * 审核修正：
- * - #2 per-node mutex：每个 agent 调用包 withNodeLock，与 /api/messages 共用，防同节点并发破坏 session。
- * - #3 session_init 持久化：收到 session_init → setActiveSession（不广播），下次可 resume。
- * - #4 Graph envelope：对外只发 node_started/node_message/node_done/node_error/run_done/run_error，
- *   provider 的 bare done 不外透。
- * - #6 fail-fast：节点抛错或 yield type:'error' 或无有效 text → node_error + run_error，停下游。
- * - #7 notice 过滤：聚合 text 时排除 `[notice]` 前缀（codex 非致命警告），取最后一条有效 text 作为下游输入。
+ * 回边（target 能经其它边回到 source）= "不满足→回到 target"；前向边 = "满足→继续/结束"。
+ * 决策点（有回边出边）自动 emit verdict（满意/不满意）；满意→前向边，不满意→回边（maxIterations ?? 3）。
+ * 单路径：每节点 ≤1 前向 + ≤1 回边。fan-out 留 M4b。
  *
- * 两步执行（#1）由 routes/graph.ts 编排：POST /run 创建 runId，前端 join_graph 后 POST /run/:id/start 才调用本函数。
+ * 终态（finish guard 各最多一次）：
+ * - 到 endNode / 无前向边 → run_done(completed, finalText=最后生产者输出||最后完成输出)。
+ * - 回边 target 已跑满 maxIterations 次 → run_done(edge_limit, 最后生产者输出)；无生产者输出 → run_error。
+ * - 决策点未取到 verdict → 当不满意（走回边，靠 maxIter 兜底）。
  */
 import { buildAgent, getActiveSession, setActiveSession } from '../AgentServiceFactory.js';
 import { withNodeLock } from '../node-mutex.js';
-import type { Graph, GraphNode } from './graph.js';
+import { computeBackEdges, DEFAULT_BACK_EDGE_MAX_ITER, type Graph, type GraphAgentNode, type GraphEdge } from './graph.js';
+import { extractVerdict, type TrailEntry, type Verdict, type VerdictContext } from './verdict.js';
 import type { AgentMessage } from '../types.js';
 import type { GraphEvent } from '../../infrastructure/websocket/SocketManager.js';
 
 export interface ExecuteOptions {
   runId: string;
-  /** 广播回调（通常绑 socketManager.broadcastGraph）。 */
   emit: (event: GraphEvent) => void;
-  /** 用户中止信号；节点间与 invoke 内部据此停止。 */
   signal?: AbortSignal;
 }
 
-interface RunOutcome {
+interface NodeOutcome {
   status: 'ok' | 'error' | 'aborted';
   finalText?: string;
   error?: string;
 }
 
-/** 拓扑序（Kahn），跳过 input 节点本身。M1 入度 ≤ 1 → 本质是链/树，串行执行即可。 */
-function topoOrder(graph: Graph): GraphNode[] {
-  const inDeg = new Map<string, number>();
-  const adj = new Map<string, string[]>();
-  for (const n of graph.nodes) {
-    inDeg.set(n.id, 0);
-    adj.set(n.id, []);
-  }
-  for (const e of graph.edges) {
-    inDeg.set(e.target, (inDeg.get(e.target) ?? 0) + 1);
-    adj.get(e.source)!.push(e.target);
-  }
-  const queue: string[] = [graph.inputNode];
-  const order: string[] = [];
-  while (queue.length > 0) {
-    const cur = queue.shift()!;
-    order.push(cur);
-    for (const next of adj.get(cur) ?? []) {
-      const d = (inDeg.get(next) ?? 1) - 1;
-      inDeg.set(next, d);
-      if (d === 0) queue.push(next);
-    }
-  }
-  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
-  return order.filter((id) => id !== graph.inputNode).map((id) => byId.get(id)!);
-}
+export type ExecNode = (node: GraphAgentNode, prompt: string, opts: ExecuteOptions) => Promise<NodeOutcome>;
 
 function ts(): number {
   return Date.now();
 }
 
-/** 执行单个 agent 节点：持锁 → invoke → 聚合最终 text。 */
-async function runAgentNode(
-  node: Extract<GraphNode, { type: 'agent' }>,
-  nodePrompt: string,
-  opts: ExecuteOptions,
-): Promise<RunOutcome> {
+/** 真实执行单个 agent 节点。 */
+export async function runAgentNode(node: GraphAgentNode, nodePrompt: string, opts: ExecuteOptions): Promise<NodeOutcome> {
   const { runId, emit, signal } = opts;
   try {
     return await withNodeLock(node.agentNodeKey, async () => {
-      if (signal?.aborted) return { status: 'aborted' } satisfies RunOutcome;
+      if (signal?.aborted) return { status: 'aborted' } satisfies NodeOutcome;
       emit({ type: 'node_started', runId, nodeId: node.id });
       const { descriptor, service } = await buildAgent(node.agentNodeKey);
       const sessionId = getActiveSession(descriptor);
@@ -88,90 +56,175 @@ async function runAgentNode(
           setActiveSession(descriptor, msg.sessionId);
           continue;
         }
-        if (msg.type === 'done') continue; // 用 node_done 取代
+        if (msg.type === 'done') continue;
         if (msg.type === 'error') {
           emit({ type: 'node_message', runId, nodeId: node.id, message: msg });
           emit({ type: 'node_error', runId, nodeId: node.id, error: msg.error });
-          return { status: 'error', error: msg.error } satisfies RunOutcome;
+          return { status: 'error', error: msg.error } satisfies NodeOutcome;
         }
-        // 聚合有效 text（排除 codex [notice] 非致命警告）
         if (msg.type === 'text' && !msg.content.startsWith('[notice]')) texts.push(msg.content);
         emit({ type: 'node_message', runId, nodeId: node.id, message: msg });
       }
-
-      // 用户中止：CLI 被 signal 杀掉，流正常结束但无完整输出
-      if (signal?.aborted) return { status: 'aborted' } satisfies RunOutcome;
+      if (signal?.aborted) return { status: 'aborted' } satisfies NodeOutcome;
 
       const finalText = texts.at(-1) ?? '';
       if (!finalText) {
         const error = `node '${node.id}' produced no valid text output`;
         emit({ type: 'node_error', runId, nodeId: node.id, error });
-        return { status: 'error', error } satisfies RunOutcome;
+        return { status: 'error', error } satisfies NodeOutcome;
       }
       emit({ type: 'node_done', runId, nodeId: node.id });
-      return { status: 'ok', finalText } satisfies RunOutcome;
+      return { status: 'ok', finalText } satisfies NodeOutcome;
     });
   } catch (err) {
+    if (signal?.aborted) return { status: 'aborted' };
     const error = (err as Error).message;
     emit({ type: 'node_error', runId, nodeId: node.id, error });
     return { status: 'error', error };
   }
 }
 
-/**
- * 执行整张图。input 节点为伪节点：不调 CLI，直接以 prompt 作为输出分发给下游。
- * 首个 agent（前驱=input）prompt = 原始 prompt；其余 agent prompt = 原始需求 + 前驱最终输出。
- */
-export async function executeGraph(prompt: string, graph: Graph, opts: ExecuteOptions): Promise<void> {
+/** 构造 prompt：决策点要求输出 VERDICT；生产者重跑带上一版+上游反馈；紧接 input 用原始需求。 */
+function buildPrompt(node: GraphAgentNode, trail: TrailEntry[], input: string, isDecision: boolean): string {
+  const prev = trail.at(-1);
+  if (isDecision) {
+    return `【原始需求】${input}\n\n【待裁定内容】${prev?.output ?? '(无)'}\n\n请判定并在结尾输出一行 \`VERDICT: APPROVE\`（满意）或 \`VERDICT: REJECT\`（不满意），其后附反馈。`;
+  }
+  const lastSelf = [...trail].reverse().find((t) => t.nodeId === node.id);
+  if (lastSelf) {
+    const fb = prev?.verdict;
+    return `【原始需求】${input}\n\n【你的上一版】${lastSelf.output}\n\n【上游裁定】${fb ? (fb.approved ? 'APPROVE' : 'REJECT') : '(无)'}\n【上游反馈】${fb?.feedback ?? '(无)'}\n\n请基于反馈修改。`;
+  }
+  return input;
+}
+
+/** 单路径条件游走（可注入 exec 用于测试）。 */
+export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptions, exec: ExecNode = runAgentNode): Promise<void> {
   const { runId, emit, signal } = opts;
   const inputNode = graph.nodes.find((n) => n.id === graph.inputNode);
   if (!inputNode || inputNode.type !== 'input') {
     emit({ type: 'run_error', runId, error: 'invalid graph: input node missing' });
     return;
   }
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  const maxExec = graph.maxNodeExecutions ?? 50;
+  const backEdges = computeBackEdges(graph);
+  const isBack = (e: GraphEdge): boolean => backEdges.has(e.id);
 
-  // 伪 input 节点：分发 prompt
+  let finished = false;
+  const finish = (ev: GraphEvent): void => {
+    if (finished) return;
+    finished = true;
+    emit(ev);
+  };
+
+  // input 伪节点
   emit({ type: 'node_started', runId, nodeId: inputNode.id });
-  const inputMsg: AgentMessage = { type: 'text', nodeId: inputNode.id, content: prompt, timestamp: ts() };
-  emit({ type: 'node_message', runId, nodeId: inputNode.id, message: inputMsg });
+  emit({ type: 'node_message', runId, nodeId: inputNode.id, message: { type: 'text', nodeId: inputNode.id, content: prompt, timestamp: ts() } as AgentMessage });
   emit({ type: 'node_done', runId, nodeId: inputNode.id });
 
-  const output = new Map<string, string>();
-  output.set(inputNode.id, prompt);
-
-  for (const node of topoOrder(graph)) {
-    if (node.type !== 'agent') continue;
-    // 节点之间检查中止
-    if (signal?.aborted) {
-      emit({ type: 'run_aborted', runId });
-      return;
-    }
-    const inEdge = graph.edges.find((e) => e.target === node.id);
-    const predId = inEdge?.source;
-    const predOutput = predId ? output.get(predId) : undefined;
-
-    let nodePrompt: string;
-    if (predId === inputNode.id) {
-      // 紧接 input：原始需求，无上游输出包装
-      nodePrompt = prompt;
-    } else {
-      nodePrompt =
-        `【原始需求】${prompt}\n\n` +
-        `【上一节点 ${predId} 的输出】${predOutput ?? '(无)'}\n\n` +
-        `请基于以上继续。`;
-    }
-
-    const result = await runAgentNode(node, nodePrompt, opts);
-    if (result.status === 'aborted') {
-      emit({ type: 'run_aborted', runId });
-      return;
-    }
-    if (result.status === 'error') {
-      emit({ type: 'run_error', runId, error: `node '${node.id}' failed: ${result.error}` });
-      return; // fail-fast
-    }
-    output.set(node.id, result.finalText!);
+  const inputOut = graph.edges.find((e) => e.source === inputNode.id);
+  if (!inputOut) {
+    finish({ type: 'run_error', runId, error: 'input node has no out-edge' });
+    return;
   }
 
-  emit({ type: 'run_done', runId });
+  let lastProducerOutput = '';
+  let lastCompletedOutput = '';
+  const trail: TrailEntry[] = [];
+  const nodeIter = new Map<string, number>();
+  let totalExec = 0;
+
+  let worklist: { nodeId: string; prompt: string }[] = [{ nodeId: inputOut.target, prompt }];
+
+  while (worklist.length > 0) {
+    const { nodeId, prompt: nodePrompt } = worklist.shift()!;
+    if (signal?.aborted) {
+      finish({ type: 'run_aborted', runId });
+      return;
+    }
+    if (++totalExec > maxExec) {
+      finish({ type: 'run_done', runId, finalText: lastProducerOutput || lastCompletedOutput, termination: 'global_limit', reason: `exceeded maxNodeExecutions ${maxExec}` });
+      return;
+    }
+
+    const node = byId.get(nodeId);
+    if (!node || node.type !== 'agent') {
+      finish({ type: 'run_error', runId, error: `walk reached non-agent node: ${nodeId}` });
+      return;
+    }
+
+    const iter = (nodeIter.get(nodeId) ?? 0) + 1;
+    nodeIter.set(nodeId, iter);
+    emit({ type: 'node_iteration', runId, nodeId, iteration: iter });
+
+    const outs = graph.edges.filter((e) => e.source === nodeId);
+    const forward = outs.filter((e) => !isBack(e));
+    const backs = outs.filter((e) => isBack(e));
+    const isDecision = backs.length > 0;
+
+    const outcome = await exec(node, nodePrompt, opts);
+    if (outcome.status === 'aborted') {
+      finish({ type: 'run_aborted', runId });
+      return;
+    }
+    if (outcome.status === 'error') {
+      finish({ type: 'run_error', runId, error: `node '${nodeId}' failed: ${outcome.error}` });
+      return;
+    }
+    const finalText = outcome.finalText ?? '';
+
+    const vctx: VerdictContext = { runId, nodeId, iteration: iter, finalText, trail };
+    const verdict: Verdict | null = isDecision ? extractVerdict(node, vctx) : null;
+    trail.push({ nodeId, output: finalText, verdict: verdict ?? undefined, iter });
+    lastCompletedOutput = finalText;
+    if (!isDecision) lastProducerOutput = finalText;
+
+    // 选边：决策点 满意→前向；不满意→回边。透传→前向。
+    let chosen: GraphEdge | undefined;
+    if (isDecision) {
+      if (verdict?.approved === true) chosen = forward[0]; // 满意→前向
+      else chosen = backs[0]; // 不满意（含未取到 verdict）→回边
+    } else {
+      chosen = forward[0]; // 透传→前向
+    }
+
+    if (!chosen) {
+      // 无可走边：透传节点无前向→自然结束；决策点满意但无前向→结束
+      finish({ type: 'run_done', runId, finalText: lastProducerOutput || lastCompletedOutput, termination: 'completed' });
+      return;
+    }
+
+    // 回边：返工目标节点已跑满 maxIterations 次 → edge_limit（采用最后生产者输出；无则 run_error）
+    if (isBack(chosen)) {
+      const cap = chosen.maxIterations ?? DEFAULT_BACK_EDGE_MAX_ITER;
+      const targetRan = nodeIter.get(chosen.target) ?? 0;
+      if (targetRan >= cap) {
+        if (lastProducerOutput) {
+          finish({ type: 'run_done', runId, finalText: lastProducerOutput, termination: 'edge_limit', reason: `node '${chosen.target}' reached maxIterations ${cap}` });
+        } else {
+          finish({ type: 'run_error', runId, error: `node '${chosen.target}' reached maxIterations ${cap} with no producer output` });
+        }
+        return;
+      }
+    }
+
+    if (graph.endNode && chosen.target === graph.endNode) {
+      finish({ type: 'run_done', runId, finalText: lastProducerOutput || lastCompletedOutput, termination: 'completed' });
+      return;
+    }
+    const targetNode = byId.get(chosen.target);
+    if (!targetNode || targetNode.type !== 'agent') {
+      // target 是 end 但未配 endNode，或非 agent → 视为结束
+      finish({ type: 'run_done', runId, finalText: lastProducerOutput || lastCompletedOutput, termination: 'completed' });
+      return;
+    }
+    worklist = [{ nodeId: chosen.target, prompt: buildPrompt(targetNode, trail, prompt, graph.edges.some((e) => e.source === chosen!.target && isBack(e))) }];
+  }
+
+  finish({ type: 'run_done', runId, finalText: lastProducerOutput || lastCompletedOutput, termination: 'completed' });
+}
+
+export async function executeGraph(prompt: string, graph: Graph, opts: ExecuteOptions): Promise<void> {
+  return walkGraph(prompt, graph, opts, runAgentNode);
 }

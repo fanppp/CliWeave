@@ -16,12 +16,11 @@ interface RunMeta {
   runId: string;
   prompt: string;
   createdAt: number;
-  nodes: { id: string; type: 'input' | 'agent'; agentNodeKey?: string }[];
+  graph: Graph;
 }
 
 function metaToGraph(meta: RunMeta): Graph {
-  const inputNode = meta.nodes.find((n) => n.type === 'input')?.id ?? meta.nodes[0]?.id ?? '__input__';
-  return { schemaVersion: 1, inputNode, nodes: meta.nodes, edges: [] };
+  return meta.graph;
 }
 
 export function useGraphRuns(): {

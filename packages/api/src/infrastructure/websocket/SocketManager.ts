@@ -11,10 +11,17 @@ import type { AgentMessage } from '../../agents/types.js';
 /** 图运行向前端广播的 envelope（不与单节点 bare done 混淆）。 */
 export type GraphEvent =
   | { type: 'node_started'; runId: string; nodeId: string }
+  | { type: 'node_iteration'; runId: string; nodeId: string; iteration: number }
   | { type: 'node_message'; runId: string; nodeId: string; message: AgentMessage }
   | { type: 'node_done'; runId: string; nodeId: string }
   | { type: 'node_error'; runId: string; nodeId: string; error: string }
-  | { type: 'run_done'; runId: string }
+  | {
+      type: 'run_done';
+      runId: string;
+      finalText: string;
+      termination: 'completed' | 'edge_limit' | 'global_limit';
+      reason?: string;
+    }
   | { type: 'run_aborted'; runId: string }
   | { type: 'run_error'; runId: string; error: string };
 

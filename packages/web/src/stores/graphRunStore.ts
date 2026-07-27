@@ -8,23 +8,38 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3004';
 
 export interface GraphNode {
   id: string;
-  type: 'input' | 'agent';
+  type: 'input' | 'agent' | 'end';
   agentNodeKey?: string;
   position?: { x: number; y: number };
 }
+export interface GraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  maxIterations?: number;
+}
 export interface Graph {
-  schemaVersion: 1;
+  schemaVersion: 3;
   inputNode: string;
+  endNode?: string;
+  maxNodeExecutions?: number;
   nodes: GraphNode[];
-  edges: { source: string; target: string }[];
+  edges: GraphEdge[];
 }
 
 export type GraphEvent =
   | { type: 'node_started'; runId: string; nodeId: string }
+  | { type: 'node_iteration'; runId: string; nodeId: string; iteration: number }
   | { type: 'node_message'; runId: string; nodeId: string; message: AgentEvent }
   | { type: 'node_done'; runId: string; nodeId: string }
   | { type: 'node_error'; runId: string; nodeId: string; error: string }
-  | { type: 'run_done'; runId: string }
+  | {
+      type: 'run_done';
+      runId: string;
+      finalText: string;
+      termination: 'completed' | 'edge_limit' | 'global_limit';
+      reason?: string;
+    }
   | { type: 'run_aborted'; runId: string }
   | { type: 'run_error'; runId: string; error: string };
 
@@ -47,6 +62,8 @@ interface GraphRunState {
   status: GraphRunStatus;
   /** 当前正在执行的节点（支持多节点并行：node_started 加 / node_done·error 删） */
   activeNodeIds: string[];
+  /** 每个节点的迭代轮次（node_iteration 更新，画布角标用） */
+  nodeIterations: Record<string, number>;
   currentRunId: string | null;
   /** 画布上选中的 agent 节点（用于右侧编辑 identity/rules） */
   selectedAgentNodeKey: string | null;
@@ -56,6 +73,8 @@ interface GraphRunState {
   agentNameMap: Record<string, string>;
   /** 由 SocketProvider 注入的共享 socket，供 startRun/abortRun 使用 */
   socket: Socket | null;
+  /** 上次保存图失败的原因（画布顶部红条显示，空=无错） */
+  saveError: string | null;
   loadGraph: (g: Graph) => void;
   setGraph: (g: Graph) => void;
   saveGraph: (g: Graph) => Promise<void>;
@@ -87,20 +106,33 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
   bubbles: [],
   status: 'idle',
   activeNodeIds: [],
+  nodeIterations: {},
   currentRunId: null,
   selectedAgentNodeKey: null,
   selectedGraphNodeId: null,
   agentNameMap: {},
   socket: null,
+  saveError: null,
   loadGraph: (g) => set({ graph: g }),
   setGraph: (g) => set({ graph: g }),
   saveGraph: async (g) => {
-    set({ graph: g });
-    await fetch(`${API_URL}/api/graph`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(g),
-    });
+    set({ graph: g, saveError: null }); // 乐观更新
+    try {
+      const res = await fetch(`${API_URL}/api/graph`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(g),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        const msg = body.error ?? `保存失败 HTTP ${res.status}`;
+        set({ saveError: msg });
+        // eslint-disable-next-line no-console
+        console.error('[saveGraph] PUT 400:', msg, '\ngraph=', g);
+      }
+    } catch (e) {
+      set({ saveError: (e as Error).message });
+    }
   },
   setReplayGraph: (g) => set({ replayGraph: g }),
   setSelectedAgentNodeKey: (key) => set({ selectedAgentNodeKey: key }),
@@ -108,7 +140,7 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
   setAgentNameMap: (m) => set({ agentNameMap: m }),
   setSocket: (s) => set({ socket: s }),
   setCurrentRun: (runId) => set({ currentRunId: runId }),
-  reset: () => set({ bubbles: [], status: 'idle', activeNodeIds: [], currentRunId: null, replayGraph: null }),
+  reset: () => set({ bubbles: [], status: 'idle', activeNodeIds: [], nodeIterations: {}, currentRunId: null, replayGraph: null }),
   startRun: async (prompt: string) => {
     const socket = get().socket;
     if (!socket || !socket.connected) throw new Error('WebSocket 未连接');
@@ -146,6 +178,8 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
       switch (event.type) {
         case 'node_started':
           return { ...s, status: 'running', activeNodeIds: addActive(s.activeNodeIds, event.nodeId) };
+        case 'node_iteration':
+          return { ...s, nodeIterations: { ...s.nodeIterations, [event.nodeId]: event.iteration } };
         case 'node_done':
           return { ...s, activeNodeIds: removeActive(s.activeNodeIds, event.nodeId) };
         case 'node_message': {
@@ -177,8 +211,18 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
           };
           return { ...s, bubbles: [...s.bubbles, bubble], activeNodeIds: removeActive(s.activeNodeIds, event.nodeId), status: 'error' };
         }
-        case 'run_done':
-          return { ...s, status: 'done', activeNodeIds: [] };
+        case 'run_done': {
+          const label = event.termination === 'completed' ? '完成' : event.termination === 'edge_limit' ? '达到最大迭代，采用最后一版' : '达到全局执行上限';
+          const bubble: GraphBubble = {
+            id: nextId(),
+            nodeId: '__run__',
+            role: 'system',
+            content: event.finalText ? `运行${label}\n\n【最终输出】\n${event.finalText}` : `运行${label}`,
+            eventType: 'run_done',
+            timestamp: Date.now(),
+          };
+          return { ...s, bubbles: [...s.bubbles, bubble], status: 'done', activeNodeIds: [] };
+        }
         case 'run_aborted': {
           const bubble: GraphBubble = {
             id: nextId(),

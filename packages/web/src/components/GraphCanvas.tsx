@@ -15,10 +15,11 @@ import {
   type Edge,
   type Connection,
   type NodeChange,
+  type EdgeChange,
   type NodeProps,
   MarkerType,
 } from '@xyflow/react';
-import { useGraphRunStore, type Graph, type GraphNode } from '../stores/graphRunStore';
+import { useGraphRunStore, type Graph, type GraphEdge, type GraphNode } from '../stores/graphRunStore';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3004';
 
@@ -30,10 +31,12 @@ interface AgentMeta {
 
 interface NodeData {
   label: string;
-  kind: 'input' | 'agent';
+  kind: 'input' | 'agent' | 'end';
   agentNodeKey?: string;
   [key: string]: unknown;
 }
+
+type FlowEdge = Edge & { maxIterations?: number };
 
 function providerColor(provider: string): string {
   switch (provider) {
@@ -48,7 +51,28 @@ function providerColor(provider: string): string {
   }
 }
 
-/** 输入节点：自带 textarea + 发送/停止（功能2） */
+/** 前端回边检测（DFS 三色，镜像后端 computeBackEdges）：target 在栈上 → 回边。 */
+function computeBackEdgeIds(nodes: { id: string }[], edges: FlowEdge[]): Set<string> {
+  const adj = new Map<string, FlowEdge[]>();
+  for (const n of nodes) adj.set(n.id, []);
+  for (const e of edges) adj.get(e.source)?.push(e);
+  const color = new Map<string, number>();
+  for (const n of nodes) color.set(n.id, 0);
+  const back = new Set<string>();
+  const dfs = (id: string, stack: Set<string>): void => {
+    color.set(id, 1);
+    stack.add(id);
+    for (const e of adj.get(id) ?? []) {
+      if (stack.has(e.target)) back.add(e.id);
+      else if ((color.get(e.target) ?? 0) === 0) dfs(e.target, stack);
+    }
+    stack.delete(id);
+    color.set(id, 2);
+  };
+  for (const n of nodes) if ((color.get(n.id) ?? 0) === 0) dfs(n.id, new Set());
+  return back;
+}
+
 function InputNode({ id }: NodeProps) {
   const status = useGraphRunStore((s) => s.status);
   const startRun = useGraphRunStore((s) => s.startRun);
@@ -56,267 +80,248 @@ function InputNode({ id }: NodeProps) {
   const [text, setText] = useState('');
   const [err, setErr] = useState<string | null>(null);
   const busy = status === 'running';
-
   const submit = useCallback(async () => {
     if (!text.trim() || busy) return;
     setErr(null);
-    try {
-      await startRun(text);
-      setText('');
-    } catch (e) {
-      setErr((e as Error).message);
-    }
+    try { await startRun(text); setText(''); } catch (e) { setErr((e as Error).message); }
   }, [text, busy, startRun]);
-
   return (
-    <div className='graph-input-node' style={styles.inputNode}>
-      {/* 输入节点是 START，只需 source handle（底部） */}
-      <Handle type='source' position={Position.Bottom} />
+    <div style={styles.inputNode}>
+      <Handle type='source' id='out' position={Position.Bottom} />
       <div style={styles.inputNodeHead}>🟰 输入</div>
-      <textarea
-        className='nodrag'
-        style={styles.inputTextarea}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder='输入需求，按发送启动图运行…'
-        rows={3}
-        disabled={busy}
-      />
+      <textarea className='nodrag' style={styles.inputTextarea} value={text} onChange={(e) => setText(e.target.value)} placeholder='输入需求，按发送启动图运行…' rows={3} disabled={busy} />
       {err && <div style={styles.inputErr}>{err}</div>}
       {busy ? (
-        <button className='nodrag' style={{ ...styles.inputBtn, background: 'var(--danger)' }} onClick={() => void abortRun()}>
-          停止
-        </button>
+        <button className='nodrag' style={{ ...styles.inputBtn, background: 'var(--danger)' }} onClick={() => void abortRun()}>停止</button>
       ) : (
-        <button className='nodrag' style={styles.inputBtn} disabled={!text.trim()} onClick={() => void submit()}>
-          发送
-        </button>
+        <button className='nodrag' style={styles.inputBtn} disabled={!text.trim()} onClick={() => void submit()}>发送</button>
       )}
       <span style={styles.inputHint}>{id}</span>
     </div>
   );
 }
 
-/** agent 节点：执行中边缘闪光 + 角标（功能3，支持多节点同时执行） */
 function AgentNode({ id, data }: NodeProps) {
   const d = data as unknown as NodeData;
   const activeNodeIds = useGraphRunStore((s) => s.activeNodeIds);
+  const nodeIterations = useGraphRunStore((s) => s.nodeIterations);
   const selectedGraphNodeId = useGraphRunStore((s) => s.selectedGraphNodeId);
   const setSelectedGraphNodeId = useGraphRunStore((s) => s.setSelectedGraphNodeId);
   const setSelectedAgentNodeKey = useGraphRunStore((s) => s.setSelectedAgentNodeKey);
   const active = activeNodeIds.includes(id);
   const provider = d.agentNodeKey?.split(':')[0] ?? 'agent';
   const selected = selectedGraphNodeId === id;
-
+  const iter = nodeIterations[id];
   return (
     <div
       className={active ? 'agent-node-active' : undefined}
-      style={{
-        ...styles.agentNode,
-        background: providerColor(provider),
-        outline: selected ? '2px solid var(--accent)' : 'none',
-      }}
-      onClick={() => {
-        setSelectedGraphNodeId(id);
-        if (d.agentNodeKey) setSelectedAgentNodeKey(d.agentNodeKey);
-      }}
+      style={{ ...styles.agentNode, background: providerColor(provider), outline: selected ? '2px solid var(--accent)' : 'none' }}
+      onClick={() => { setSelectedGraphNodeId(id); if (d.agentNodeKey) setSelectedAgentNodeKey(d.agentNodeKey); }}
     >
-      <Handle type='target' position={Position.Top} />
+      <Handle type='target' id='in' position={Position.Top} />
+      {/* 左侧 loop handles：回边 B→A = 从下方节点 back-out 拖到上方节点 back-in（向上） */}
+      <Handle type='source' id='back-out' position={Position.Left} style={{ ...styles.loopHandle, top: '30%' }} />
+      <Handle type='target' id='back-in' position={Position.Left} style={{ ...styles.loopHandle, top: '70%' }} />
       <div style={styles.agentHead}>
         <strong style={{ fontSize: 12 }}>{provider}</strong>
+        {(iter ?? 0) > 1 ? <span style={styles.iterBadge}>iter {iter}</span> : null}
         {active && <span style={styles.badge}>执行中</span>}
       </div>
       <div style={styles.agentLabel}>{d.label}</div>
-      <div style={styles.agentKey}>{d.agentNodeKey}</div>
-      <Handle type='source' position={Position.Bottom} />
+      <Handle type='source' id='out' position={Position.Bottom} />
     </div>
   );
 }
 
-const nodeTypes = { input: InputNode, agent: AgentNode };
+function EndNode() {
+  return (
+    <div style={styles.endNode}>
+      <Handle type='target' id='in' position={Position.Top} />
+      <Handle type='target' id='back-in' position={Position.Left} style={{ ...styles.loopHandle, top: '70%' }} />
+      <div style={{ fontSize: 12, fontWeight: 700 }}>⏹ 结束</div>
+    </div>
+  );
+}
+
+const nodeTypes = { input: InputNode, agent: AgentNode, end: EndNode };
 
 function toFlowNodes(graph: Graph | null, agentNameMap: Map<string, string>): Node[] {
   if (!graph) return [];
   return graph.nodes.map((n, i) => {
-    const isInput = n.type === 'input';
-    const pos = n.position ?? { x: 80 + (i % 3) * 240, y: 60 + Math.floor(i / 3) * 160 };
-    const provider = n.agentNodeKey?.split(':')[0] ?? 'input';
-    const name = n.agentNodeKey ? (agentNameMap.get(n.agentNodeKey) ?? n.agentNodeKey) : '输入';
-    const data: NodeData = {
-      label: isInput ? '🟰 输入' : name,
-      kind: n.type,
-      ...(n.type === 'agent' ? { agentNodeKey: n.agentNodeKey } : {}),
-    };
-    return {
-      id: n.id,
-      type: isInput ? 'input' : 'agent',
-      position: pos,
-      data,
-      deletable: !isInput,
-    } as Node;
+    const pos = n.position ?? { x: 320, y: 80 + i * 140 };
+    const name = n.type === 'agent' && n.agentNodeKey ? (agentNameMap.get(n.agentNodeKey) ?? n.agentNodeKey) : n.type === 'input' ? '输入' : '结束';
+    const data: NodeData = { label: name, kind: n.type, ...(n.type === 'agent' ? { agentNodeKey: n.agentNodeKey } : {}) };
+    return { id: n.id, type: n.type, position: pos, data, deletable: n.type !== 'input' && n.type !== 'end' } as Node;
   });
 }
 
-function toFlowEdges(graph: Graph | null): Edge[] {
+function toFlowEdges(graph: Graph | null, backIds: Set<string>): FlowEdge[] {
   if (!graph) return [];
-  return graph.edges.map((e) => ({
-    id: `${e.source}->${e.target}`,
-    source: e.source,
-    target: e.target,
-    markerEnd: { type: MarkerType.ArrowClosed },
-  }));
+  return graph.edges.map((e) => {
+    const isBack = backIds.has(e.id);
+    return {
+      id: e.id, source: e.source, target: e.target,
+      sourceHandle: isBack ? 'back-out' : 'out',
+      targetHandle: isBack ? 'back-in' : 'in',
+      markerEnd: { type: MarkerType.ArrowClosed },
+      style: isBack ? { stroke: '#f87171', strokeDasharray: '6 4' } : { stroke: '#9aa3ad' },
+      label: isBack ? `回边${e.maxIterations ? `·${e.maxIterations}` : '·3'}` : '',
+      labelStyle: { fill: '#f87171', fontSize: 10 },
+      ...(e.maxIterations != null ? { maxIterations: e.maxIterations } : {}),
+    } as FlowEdge;
+  });
 }
 
 export function GraphCanvas() {
   const graph = useGraphRunStore((s) => s.graph);
   const loadGraph = useGraphRunStore((s) => s.loadGraph);
   const saveGraph = useGraphRunStore((s) => s.saveGraph);
-  const setSelectedAgentNodeKey = useGraphRunStore((s) => s.setSelectedAgentNodeKey);
-  const setSelectedGraphNodeId = useGraphRunStore((s) => s.setSelectedGraphNodeId);
-  const setAgentNameMap = useGraphRunStore((s) => s.setAgentNameMap);
+  const saveError = useGraphRunStore((s) => s.saveError);
   const selectedGraphNodeId = useGraphRunStore((s) => s.selectedGraphNodeId);
+  const setSelectedGraphNodeId = useGraphRunStore((s) => s.setSelectedGraphNodeId);
+  const setSelectedAgentNodeKey = useGraphRunStore((s) => s.setSelectedAgentNodeKey);
 
   const [agents, setAgents] = useState<AgentMeta[]>([]);
   const agentNameMap = useMemo(() => new Map(agents.map((a) => [a.nodeKey, a.name] as const)), [agents]);
   const [nodes, setNodes, onNodesChange] = useNodesState(toFlowNodes(graph, agentNameMap));
-  const [edges, setEdges, onEdgesChange] = useEdgesState(toFlowEdges(graph));
+  const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>([]);
   const [picker, setPicker] = useState(false);
+  const [selEdge, setSelEdge] = useState<FlowEdge | null>(null);
   const skipCommit = useRef(true);
+
+  // 回边集（随 nodes/edges 变化重算，用于边样式 + 面板标签）
+  const backIds = useMemo(() => computeBackEdgeIds(nodes, edges), [nodes, edges]);
 
   useEffect(() => {
     if (graph) return;
-    fetch(`${API_URL}/api/graph`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((g: Graph | null) => {
-        if (g) {
-          loadGraph(g);
-          setNodes(toFlowNodes(g, agentNameMap));
-          setEdges(toFlowEdges(g));
-        }
-      })
-      .catch(() => undefined);
+    fetch(`${API_URL}/api/graph`).then((r) => (r.ok ? r.json() : null)).then((g: Graph | null) => {
+      if (g) { loadGraph(g); setNodes(toFlowNodes(g, agentNameMap)); }
+    }).catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // graph 加载后同步边（带回边样式）
   useEffect(() => {
-    setNodes(toFlowNodes(graph, agentNameMap));
-    setEdges(toFlowEdges(graph));
+    const bid = computeBackEdgeIds(graph?.nodes ?? [], (graph?.edges ?? []) as unknown as FlowEdge[]);
+    setEdges(toFlowEdges(graph, bid));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graph]);
 
   useEffect(() => {
-    fetch(`${API_URL}/api/agents`)
-      .then((r) => (r.ok ? r.json() : []))
-      .then((list: AgentMeta[]) => {
-        const arr = Array.isArray(list) ? list : [];
-        setAgents(arr);
-        setAgentNameMap(Object.fromEntries(arr.map((a) => [a.nodeKey, a.name] as const)));
-      })
-      .catch(() => setAgents([]));
+    fetch(`${API_URL}/api/agents`).then((r) => (r.ok ? r.json() : [])).then((list: AgentMeta[]) => setAgents(Array.isArray(list) ? list : [])).catch(() => setAgents([]));
   }, []);
 
-  const commit = useCallback(
-    (nextNodes: Node[], nextEdges: Edge[]) => {
-      if (skipCommit.current) return;
-      void saveGraph(buildGraph(nextNodes, nextEdges));
-    },
-    [saveGraph],
-  );
+  const commit = useCallback((ns: Node[], es: FlowEdge[]) => {
+    if (skipCommit.current) return;
+    if (ns.length === 0) return;
+    void saveGraph(buildGraph(ns, es));
+  }, [saveGraph]);
 
   useEffect(() => {
-    if (skipCommit.current) {
-      skipCommit.current = false;
-      return;
-    }
+    if (skipCommit.current) { skipCommit.current = false; return; }
     const t = setTimeout(() => commit(nodes, edges), 300);
     return () => clearTimeout(t);
   }, [nodes, edges, commit]);
 
-  const handleConnect = useCallback(
-    (c: Connection) => {
-      setEdges((eds) => addEdge({ ...c, markerEnd: { type: MarkerType.ArrowClosed } }, eds));
-    },
-    [setEdges],
-  );
+  const handleConnect = useCallback((c: Connection) => {
+    if (!c.source || !c.target) return;
+    setEdges((eds) => {
+      // 同向重复（如已有 A→B 又画 A→B）静默忽略，避免落 400 后画布残留坏边
+      if (eds.some((e) => e.source === c.source && e.target === c.target)) return eds;
+      return addEdge<FlowEdge>({ ...c, id: `e${Date.now().toString(36)}`, markerEnd: { type: MarkerType.ArrowClosed } }, eds);
+    });
+  }, [setEdges]);
 
-  const handleNodesChange = useCallback(
-    (changes: NodeChange[]) => {
-      onNodesChange(changes);
-      const removed = new Set(
-        changes.filter((c) => c.type === 'remove').map((c) => (c as { id: string }).id),
-      );
-      if (removed.size > 0) {
-        setEdges((eds) => eds.filter((e) => !removed.has(e.source) && !removed.has(e.target)));
-      }
-    },
-    [onNodesChange, setEdges],
-  );
+  const handleNodesChange = useCallback((changes: NodeChange[]) => {
+    onNodesChange(changes);
+    const removed = new Set(changes.filter((c) => c.type === 'remove').map((c) => (c as { id: string }).id));
+    if (removed.size > 0) setEdges((es) => es.filter((e) => !removed.has(e.source) && !removed.has(e.target)));
+  }, [onNodesChange, setEdges]);
 
-  // 点击空白处取消选择（流过滤 + 配置选择都清）
+  const handleEdgesChange = useCallback((changes: EdgeChange[]) => { onEdgesChange(changes); }, [onEdgesChange]);
+
   const handlePaneClick = useCallback(() => {
-    setSelectedGraphNodeId(null);
-    setSelectedAgentNodeKey(null);
-  }, [setSelectedGraphNodeId, setSelectedAgentNodeKey]);
+    setSelectedGraphNodeId(null); setSelectedAgentNodeKey(null); setSelEdge(null);
+    setNodes((ns) => ns.map((n) => ({ ...n, selected: false })));
+    setEdges((es) => es.map((e) => ({ ...e, selected: false })));
+  }, [setSelectedGraphNodeId, setSelectedAgentNodeKey, setNodes, setEdges]);
 
-  // 删除选中（节点非 input + 边），用 xyflow selected 标记，不依赖键盘焦点（#1）
   const deleteSelected = useCallback(() => {
-    setNodes((ns) => ns.filter((n) => !(n.selected && n.id !== '__input__' && (n.data as unknown as NodeData).kind !== 'input')));
+    setNodes((ns) => ns.filter((n) => !(n.selected && (n.data as unknown as NodeData).kind !== 'input' && (n.data as unknown as NodeData).kind !== 'end')));
     setEdges((es) => es.filter((e) => !e.selected));
+    setSelEdge(null);
   }, [setNodes, setEdges]);
 
-  // 加节点；若已选中某 agent 节点，自动连边作为"后续节点"（#2）
-  const addAgentNode = useCallback(
-    (agent: AgentMeta) => {
-      const id = `n${Date.now().toString(36)}`;
-      const data: NodeData = { label: agent.name, kind: 'agent', agentNodeKey: agent.nodeKey };
-      const fromId = selectedGraphNodeId && selectedGraphNodeId !== '__input__' ? selectedGraphNodeId : null;
-      const newNode: Node = {
-        id,
-        type: 'agent',
-        position: { x: 120 + Math.random() * 200, y: 100 + Math.random() * 160 },
-        data,
-        deletable: true,
-      };
-      setNodes((ns) => [...ns, newNode]);
-      if (fromId) {
-        setEdges((es) => [...es, { id: `${fromId}->${id}`, source: fromId, target: id, markerEnd: { type: MarkerType.ArrowClosed } }]);
-      }
-      setPicker(false);
-    },
-    [setNodes, setEdges, selectedGraphNodeId],
-  );
+  const onEdgeClick = useCallback((_: unknown, edge: Edge) => {
+    setSelEdge(edge as FlowEdge);
+    setNodes((ns) => ns.map((n) => ({ ...n, selected: false })));
+    setSelectedGraphNodeId(null); setSelectedAgentNodeKey(null);
+  }, [setNodes, setSelectedGraphNodeId, setSelectedAgentNodeKey]);
+
+  const onNodeClick = useCallback((_: unknown, _node: Node) => {
+    setEdges((es) => es.map((e) => ({ ...e, selected: false })));
+    setSelEdge(null);
+  }, [setEdges]);
+
+  const addAgentNode = useCallback((agent: AgentMeta) => {
+    const id = `n${Date.now().toString(36)}`;
+    const data: NodeData = { label: agent.name, kind: 'agent', agentNodeKey: agent.nodeKey };
+    // 按顺序纵向排列（从上到下），保证左侧 loop handle 可达
+    const idx = nodes.length;
+    setNodes((ns) => [...ns, { id, type: 'agent', position: { x: 320, y: 80 + idx * 140 }, data, deletable: true } as Node]);
+    setPicker(false);
+  }, [setNodes, nodes.length]);
+
+  const addEndNode = useCallback(() => {
+    if (nodes.some((n) => (n.data as unknown as NodeData).kind === 'end')) return;
+    const id = `end_${Date.now().toString(36)}`;
+    const idx = nodes.length;
+    setNodes((ns) => [...ns, { id, type: 'end', position: { x: 320, y: 80 + idx * 140 }, data: { label: '结束', kind: 'end' }, deletable: false } as Node]);
+  }, [nodes, setNodes]);
+
+  // 选中边编辑 maxIterations（仅回边有意义；前向边无需）
+  const updateEdge = useCallback((maxIterations: number | null) => {
+    if (!selEdge) return;
+    setEdges((es) => es.map((e) => e.id === selEdge.id ? { ...e, ...(maxIterations != null ? { maxIterations } : {}) } : e));
+    setSelEdge((se) => se ? { ...se, ...(maxIterations != null ? { maxIterations } : {}) } : se);
+  }, [selEdge, setEdges]);
 
   const graphNodes = useMemo(() => graph?.nodes ?? [], [graph]);
+  const selEdgeIsBack = selEdge ? backIds.has(selEdge.id) : false;
 
   return (
     <div style={styles.wrap}>
       <div style={styles.toolbar}>
-        <button style={styles.btn} onClick={() => setPicker((v) => !v)}>
-          + 加入节点{selectedGraphNodeId && selectedGraphNodeId !== '__input__' ? '（后续）' : ''}
-        </button>
-        <button style={{ ...styles.btn, background: 'var(--surface-raised)', color: 'var(--text)' }} onClick={deleteSelected}>
-          删除选中
-        </button>
-        <span style={styles.hint}>选中节点/边后点「删除选中」；点节点显示其流+配置；选中后加入节点=后续</span>
+        <button style={styles.btn} onClick={() => setPicker((v) => !v)}>+ 加入节点</button>
+        <button style={{ ...styles.btn, background: 'var(--surface-raised)', color: 'var(--text)' }} onClick={() => void addEndNode()}>+ 结束节点</button>
+        <button style={{ ...styles.btn, background: 'var(--surface-raised)', color: 'var(--text)' }} onClick={deleteSelected}>删除选中</button>
+        <span style={styles.hint}>前向边：上节点底部 → 下节点顶部。回边：从下节点左侧 back-out 拖到上节点左侧 back-in（向上=不满足→回），默认返工3次。</span>
       </div>
+      {saveError && <div style={styles.errBanner} title={saveError}>⚠ {saveError}</div>}
       {picker && (
         <div style={styles.picker}>
           {agents.length === 0 && <div style={styles.pickerEmpty}>没有可用 agent 节点</div>}
           {agents.map((a) => {
             const inGraph = graphNodes.some((n) => n.type === 'agent' && n.agentNodeKey === a.nodeKey);
             return (
-              <button
-                key={a.nodeKey}
-                style={{ ...styles.agentBtn, ...(inGraph ? styles.agentBtnDisabled : {}) }}
-                disabled={inGraph}
-                onClick={() => addAgentNode(a)}
-                title={inGraph ? '已在图中（agentNodeKey 唯一）' : `加入 ${a.nodeKey}`}
-              >
-                <strong>{a.provider}</strong> · {a.name}
-                {inGraph && <span> ✓</span>}
+              <button key={a.nodeKey} style={{ ...styles.agentBtn, ...(inGraph ? styles.agentBtnDisabled : {}) }} disabled={inGraph} onClick={() => addAgentNode(a)} title={inGraph ? '已在图中' : `加入 ${a.nodeKey}`}>
+                <strong>{a.provider}</strong> · {a.name}{inGraph && <span> ✓</span>}
               </button>
             );
           })}
+        </div>
+      )}
+      {selEdge && (
+        <div style={styles.edgePanel}>
+          <strong style={{ fontSize: 11 }}>边 {selEdge.id}</strong>
+          <div style={{ fontSize: 10, color: selEdgeIsBack ? 'var(--danger)' : 'var(--text-faint)' }}>
+            {selEdgeIsBack ? '↩ 回边（不满足→回到目标；决策点会解析 VERDICT）' : '→ 前向边（满意→继续）'}
+          </div>
+          {selEdgeIsBack && (
+            <label style={styles.edgeLabel}>maxIterations（空=默认3）
+              <input className='nodrag' style={styles.edgeInput} type='number' min={1} value={selEdge.maxIterations ?? ''} onChange={(e) => updateEdge(e.target.value === '' ? null : Math.max(1, Number(e.target.value)))} />
+            </label>
+          )}
         </div>
       )}
       <div style={styles.flow}>
@@ -325,9 +330,11 @@ export function GraphCanvas() {
           edges={edges}
           nodeTypes={nodeTypes}
           onNodesChange={handleNodesChange}
-          onEdgesChange={onEdgesChange}
+          onEdgesChange={handleEdgesChange}
           onConnect={handleConnect}
           onPaneClick={handlePaneClick}
+          onEdgeClick={onEdgeClick}
+          onNodeClick={onNodeClick}
           deleteKeyCode={['Backspace', 'Delete']}
           fitView
           nodesDraggable
@@ -341,17 +348,18 @@ export function GraphCanvas() {
   );
 }
 
-function buildGraph(nodes: Node[], edges: Edge[]): Graph {
+function buildGraph(nodes: Node[], edges: FlowEdge[]): Graph {
   const graphNodes: GraphNode[] = nodes.map((n) => {
     const data = n.data as unknown as NodeData;
-    if (data.kind === 'input') {
-      return { id: n.id, type: 'input', position: n.position };
-    }
-    return { id: n.id, type: 'agent', position: n.position, agentNodeKey: data.agentNodeKey ?? '' };
+    const base = { id: n.id, position: n.position };
+    if (data.kind === 'input') return { ...base, type: 'input' } as GraphNode;
+    if (data.kind === 'end') return { ...base, type: 'end' } as GraphNode;
+    return { ...base, type: 'agent', agentNodeKey: data.agentNodeKey ?? '' } as GraphNode;
   });
-  const graphEdges = edges.map((e) => ({ source: e.source, target: e.target }));
+  const graphEdges: GraphEdge[] = edges.map((e) => ({ id: e.id, source: e.source, target: e.target, ...(e.maxIterations != null ? { maxIterations: e.maxIterations } : {}) }));
   const inputNode = graphNodes.find((n) => n.type === 'input')?.id ?? '__input__';
-  return { schemaVersion: 1, inputNode, nodes: graphNodes, edges: graphEdges };
+  const endNode = graphNodes.find((n) => n.type === 'end')?.id;
+  return { schemaVersion: 3, inputNode, ...(endNode ? { endNode } : {}), nodes: graphNodes, edges: graphEdges };
 }
 
 const styles: Record<string, CSSProperties> = {
@@ -359,10 +367,14 @@ const styles: Record<string, CSSProperties> = {
   toolbar: { display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px', borderBottom: '1px solid var(--border)' },
   btn: { background: 'var(--accent)', color: 'var(--accent-text)', border: 'none', borderRadius: 6, padding: '6px 12px', fontSize: 13, cursor: 'pointer' },
   hint: { fontSize: 12, color: 'var(--text-faint)' },
+  errBanner: { background: 'var(--bubble-system)', color: 'var(--danger)', fontSize: 12, padding: '6px 12px', borderBottom: '1px solid var(--border)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   picker: { position: 'absolute', top: 44, left: 12, zIndex: 10, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: 8, display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 260, overflowY: 'auto', minWidth: 220 },
   pickerEmpty: { color: 'var(--text-faint)', fontSize: 12, padding: 8 },
   agentBtn: { textAlign: 'left', background: 'var(--surface-raised)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6, padding: '8px 10px', fontSize: 12, cursor: 'pointer' },
   agentBtnDisabled: { opacity: 0.4, cursor: 'not-allowed' },
+  edgePanel: { position: 'absolute', top: 44, right: 12, zIndex: 10, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: 10, display: 'flex', flexDirection: 'column', gap: 8, minWidth: 220 },
+  edgeLabel: { display: 'flex', flexDirection: 'column', fontSize: 11, color: 'var(--text-muted)', gap: 4 },
+  edgeInput: { background: 'var(--surface-raised)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 4, padding: '4px 6px', fontSize: 12 },
   flow: { flex: 1, minHeight: 0 },
   inputNode: { width: 240, background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 8, padding: 8, display: 'flex', flexDirection: 'column', gap: 6 },
   inputNodeHead: { fontSize: 12, fontWeight: 700, color: 'var(--text-strong)' },
@@ -371,8 +383,10 @@ const styles: Record<string, CSSProperties> = {
   inputBtn: { background: 'var(--accent)', color: 'var(--accent-text)', border: 'none', borderRadius: 4, padding: '6px 10px', fontSize: 13, cursor: 'pointer' },
   inputHint: { fontSize: 10, color: 'var(--text-faint)' },
   agentNode: { width: 170, padding: 8, borderRadius: 8, color: '#e6e6e6', cursor: 'pointer', border: '1px solid var(--border)' },
-  agentHead: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  agentHead: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, gap: 4 },
   badge: { fontSize: 10, background: 'var(--success)', color: '#001', padding: '1px 6px', borderRadius: 8, fontWeight: 700 },
+  iterBadge: { fontSize: 9, background: 'var(--accent)', color: '#fff', padding: '1px 5px', borderRadius: 8 },
   agentLabel: { fontSize: 13, fontWeight: 600 },
-  agentKey: { fontSize: 10, color: 'var(--text-faint)', marginTop: 2 },
+  loopHandle: { width: 8, height: 8, background: 'var(--danger)', border: '1px solid #fff' },
+  endNode: { width: 100, padding: '8px 10px', borderRadius: 8, background: 'var(--surface-raised)', border: '1px solid var(--border)', textAlign: 'center', color: 'var(--text-muted)' },
 };

@@ -1,55 +1,65 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 3,
   "inputNode": "__input__",
+  "endNode": "__end__",
+  "maxNodeExecutions": 50,
   "nodes": [
     {
       "id": "__input__",
       "type": "input",
       "position": {
-        "x": -30.06441825238906,
-        "y": -30.3287294623055
+        "x": -355.33163265306115,
+        "y": -43.06122448979589
       }
     },
     {
-      "id": "nms2m5ask",
-      "type": "agent",
-      "agentNodeKey": "claude:reviewer",
-      "position": {
-        "x": 484.53766135145577,
-        "y": 135.17208102006757
-      }
-    },
-    {
-      "id": "nms2m5egx",
+      "id": "A",
       "type": "agent",
       "agentNodeKey": "codex:coder",
       "position": {
-        "x": 289.1652867287572,
-        "y": 32.34777038002505
+        "x": -181.29385705032246,
+        "y": 225.5556519210757
       }
     },
     {
-      "id": "nms2m600q",
+      "id": "B",
       "type": "agent",
-      "agentNodeKey": "opencode:testing",
+      "agentNodeKey": "claude:reviewer",
       "position": {
-        "x": 524.788844147907,
-        "y": 262.59299590550705
+        "x": -163.59442322198257,
+        "y": 357.8950344224065
+      }
+    },
+    {
+      "id": "__end__",
+      "type": "end",
+      "position": {
+        "x": -224.68996285974322,
+        "y": 515.4100655137612
       }
     }
   ],
   "edges": [
     {
-      "source": "nms2m5egx",
-      "target": "nms2m5ask"
-    },
-    {
-      "source": "nms2m5ask",
-      "target": "nms2m600q"
-    },
-    {
+      "id": "ems2x7u9y",
       "source": "__input__",
-      "target": "nms2m5egx"
+      "target": "A"
+    },
+    {
+      "id": "ems2x82z3",
+      "source": "A",
+      "target": "B"
+    },
+    {
+      "id": "ems2xnb94",
+      "source": "B",
+      "target": "__end__"
+    },
+    {
+      "id": "ems2xzq42",
+      "source": "B",
+      "target": "A",
+      "maxIterations": 2
     }
   ]
 }
