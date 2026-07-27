@@ -9,7 +9,7 @@
  */
 import type { FastifyInstance, FastifyPluginCallback } from 'fastify';
 import { executeGraph } from '../agents/graph/AgentRouter.js';
-import { GraphSchema, GraphValidationError, readGraph, validateGraph, writeGraph } from '../agents/graph/graph.js';
+import { GraphSchema, GraphValidationError, readGraph, validateGraph, validateRunnable, writeGraph } from '../agents/graph/graph.js';
 import type { Graph } from '../agents/graph/graph.js';
 import { closeRunStream, listRuns, readRun, recordRunEvent, recordRunStart } from '../agents/graph/graph-run-store.js';
 import { readNodeDescriptor } from '../agents/NodeDescriptor.js';
@@ -100,9 +100,10 @@ const graphRoutes: FastifyPluginCallback<GraphRouteOptions> = (app, options, don
       let graph;
       try {
         graph = readGraph();
+        validateRunnable(graph); // 运行前严格校验（入度≤1/无环/可达）；编辑态可不满足
       } catch (err) {
         pendingRuns.delete(runId);
-        const msg = err instanceof Error ? err.message : 'failed to read graph';
+        const msg = err instanceof Error ? err.message : 'graph not runnable';
         socketManager.broadcastGraph({ type: 'run_error', runId, error: msg });
         return reply.code(400).send({ error: msg });
       }

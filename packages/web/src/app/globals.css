@@ -64,3 +64,13 @@ button {
 input {
   font-family: inherit;
 }
+
+/* 图运行：执行中节点边缘闪光 */
+@keyframes agent-node-glow {
+  0%, 100% { box-shadow: 0 0 0 1px var(--border); }
+  50% { box-shadow: 0 0 14px 2px var(--success); }
+}
+.agent-node-active {
+  animation: agent-node-glow 1.2s ease-in-out infinite;
+  border-color: var(--success) !important;
+}

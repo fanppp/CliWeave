@@ -3,8 +3,18 @@ node_modules/
 dist/
 .turbo/
 *.log
+# Credentials / secrets at any depth (never commit).
 .env
-.env.local
+.env.*
+!.env.example
+**/auth.json
+**/.credentials.json
+**/credentials.json
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
 .DS_Store
 *.tsbuildinfo
 

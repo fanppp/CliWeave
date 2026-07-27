@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 3,
+  "localId": "reviewer",
+  "name": "claude reviewer",
+  "provider": "claude",
+  "cli": {
+    "command": "claude",
+    "sandboxMode": "danger-full-access",
+    "extraArgs": [],
+    "promptVia": "stdin",
+    "cwd": "${PROJECT_ROOT}"
+  },
+  "storage": {
+    "config": {
+      "identityFile": "agents/claude/reviewer/config/identity.md",
+      "rulesFiles": [
+        "agents/claude/reviewer/config/rules/*.md"
+      ]
+    },
+    "runtime": {
+      "activeSessionFile": "agents/claude/reviewer/runtime/active-session.json",
+      "resume": true
+    },
+    "data": {
+      "cliHome": "agents/claude/reviewer/data/cli/.claude"
+    }
+  }
+}

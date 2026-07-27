@@ -1,7 +1,10 @@
 'use client';
 
 import { create } from 'zustand';
+import type { Socket } from 'socket.io-client';
 import type { AgentEvent } from './chatStore';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3004';
 
 export interface GraphNode {
   id: string;
@@ -39,16 +42,30 @@ export type GraphRunStatus = 'idle' | 'running' | 'done' | 'error';
 
 interface GraphRunState {
   graph: Graph | null;
-  /** 重放历史 run 时的图快照（用于节点配色/label）；null 时用 live graph。 */
   replayGraph: Graph | null;
   bubbles: GraphBubble[];
   status: GraphRunStatus;
-  activeNodeId: string | null;
+  /** 当前正在执行的节点（支持多节点并行：node_started 加 / node_done·error 删） */
+  activeNodeIds: string[];
   currentRunId: string | null;
+  /** 画布上选中的 agent 节点（用于右侧编辑 identity/rules） */
+  selectedAgentNodeKey: string | null;
+  /** 画布上选中的图节点 id（用于 GraphRunStream 过滤显示该节点流） */
+  selectedGraphNodeId: string | null;
+  /** agentNodeKey → 显示名 映射（GraphCanvas 填充，GraphRunStream 下拉用） */
+  agentNameMap: Record<string, string>;
+  /** 由 SocketProvider 注入的共享 socket，供 startRun/abortRun 使用 */
+  socket: Socket | null;
   loadGraph: (g: Graph) => void;
   setGraph: (g: Graph) => void;
   saveGraph: (g: Graph) => Promise<void>;
   setReplayGraph: (g: Graph | null) => void;
+  setSelectedAgentNodeKey: (key: string | null) => void;
+  setSelectedGraphNodeId: (id: string | null) => void;
+  setAgentNameMap: (m: Record<string, string>) => void;
+  setSocket: (s: Socket | null) => void;
+  startRun: (prompt: string) => Promise<void>;
+  abortRun: () => Promise<void>;
   pushEvent: (event: GraphEvent) => void;
   reset: () => void;
   setCurrentRun: (runId: string | null) => void;
@@ -56,19 +73,29 @@ interface GraphRunState {
 
 let seq = 0;
 const nextId = (): string => `g${Date.now()}_${seq++}`;
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3004';
 
-export const useGraphRunStore = create<GraphRunState>((set) => ({
+function addActive(list: string[], id: string): string[] {
+  return list.includes(id) ? list : [...list, id];
+}
+function removeActive(list: string[], id: string): string[] {
+  return list.filter((x) => x !== id);
+}
+
+export const useGraphRunStore = create<GraphRunState>((set, get) => ({
   graph: null,
   replayGraph: null,
   bubbles: [],
   status: 'idle',
-  activeNodeId: null,
+  activeNodeIds: [],
   currentRunId: null,
+  selectedAgentNodeKey: null,
+  selectedGraphNodeId: null,
+  agentNameMap: {},
+  socket: null,
   loadGraph: (g) => set({ graph: g }),
   setGraph: (g) => set({ graph: g }),
   saveGraph: async (g) => {
-    set({ graph: g }); // 乐观更新
+    set({ graph: g });
     await fetch(`${API_URL}/api/graph`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -76,16 +103,51 @@ export const useGraphRunStore = create<GraphRunState>((set) => ({
     });
   },
   setReplayGraph: (g) => set({ replayGraph: g }),
+  setSelectedAgentNodeKey: (key) => set({ selectedAgentNodeKey: key }),
+  setSelectedGraphNodeId: (id) => set({ selectedGraphNodeId: id }),
+  setAgentNameMap: (m) => set({ agentNameMap: m }),
+  setSocket: (s) => set({ socket: s }),
   setCurrentRun: (runId) => set({ currentRunId: runId }),
-  reset: () => set({ bubbles: [], status: 'idle', activeNodeId: null, currentRunId: null, replayGraph: null }),
+  reset: () => set({ bubbles: [], status: 'idle', activeNodeIds: [], currentRunId: null, replayGraph: null }),
+  startRun: async (prompt: string) => {
+    const socket = get().socket;
+    if (!socket || !socket.connected) throw new Error('WebSocket 未连接');
+    get().reset();
+    const createRes = await fetch(`${API_URL}/api/graph/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt }),
+    });
+    if (!createRes.ok) throw new Error(`创建运行失败: ${(await createRes.json()).error ?? createRes.status}`);
+    const { runId } = (await createRes.json()) as { runId: string };
+    set({ currentRunId: runId });
+    // join_graph 用 ack 回调确认已入 room 再 start（防丢首批事件）
+    await new Promise<void>((resolve, reject) => {
+      socket.timeout(5000).emit('join_graph', runId, (err?: unknown) => {
+        if (err) reject(new Error('join_graph 超时'));
+        else resolve();
+      });
+    });
+    const startRes = await fetch(`${API_URL}/api/graph/run/${runId}/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    if (!startRes.ok) throw new Error(`启动运行失败: ${(await startRes.json()).error ?? startRes.status}`);
+  },
+  abortRun: async () => {
+    const runId = get().currentRunId;
+    if (!runId) return;
+    await fetch(`${API_URL}/api/graph/run/${runId}/abort`, { method: 'POST' });
+  },
   pushEvent: (event) =>
     set((s) => {
-      if (s.currentRunId && event.runId !== s.currentRunId) return s; // 忽略其他 run
+      if (s.currentRunId && event.runId !== s.currentRunId) return s;
       switch (event.type) {
         case 'node_started':
-          return { ...s, status: 'running', activeNodeId: event.nodeId };
+          return { ...s, status: 'running', activeNodeIds: addActive(s.activeNodeIds, event.nodeId) };
         case 'node_done':
-          return s.activeNodeId === event.nodeId ? { ...s, activeNodeId: null } : s;
+          return { ...s, activeNodeIds: removeActive(s.activeNodeIds, event.nodeId) };
         case 'node_message': {
           const m = event.message;
           if (m.type === 'session_init' || m.type === 'done') return s;
@@ -113,10 +175,10 @@ export const useGraphRunStore = create<GraphRunState>((set) => ({
             eventType: 'node_error',
             timestamp: Date.now(),
           };
-          return { ...s, bubbles: [...s.bubbles, bubble], activeNodeId: null, status: 'error' };
+          return { ...s, bubbles: [...s.bubbles, bubble], activeNodeIds: removeActive(s.activeNodeIds, event.nodeId), status: 'error' };
         }
         case 'run_done':
-          return { ...s, status: 'done', activeNodeId: null };
+          return { ...s, status: 'done', activeNodeIds: [] };
         case 'run_aborted': {
           const bubble: GraphBubble = {
             id: nextId(),
@@ -126,7 +188,7 @@ export const useGraphRunStore = create<GraphRunState>((set) => ({
             eventType: 'run_aborted',
             timestamp: Date.now(),
           };
-          return { ...s, bubbles: [...s.bubbles, bubble], status: 'idle', activeNodeId: null };
+          return { ...s, bubbles: [...s.bubbles, bubble], status: 'idle', activeNodeIds: [] };
         }
         case 'run_error': {
           const bubble: GraphBubble = {
@@ -137,7 +199,7 @@ export const useGraphRunStore = create<GraphRunState>((set) => ({
             eventType: 'run_error',
             timestamp: Date.now(),
           };
-          return { ...s, bubbles: [...s.bubbles, bubble], status: 'error', activeNodeId: null };
+          return { ...s, bubbles: [...s.bubbles, bubble], status: 'error', activeNodeIds: [] };
         }
         default:
           return s;

@@ -75,11 +75,12 @@ export class GraphValidationError extends Error {
 }
 
 /**
- * 结构性校验：唯一 id / agentNodeKey 唯一 / 边引用合法 / 恰好一个 input / inputNode 存在且为 input 类型 /
- * M1 agent 入度 ≤ 1 / 无重边 / 无自环 / 无环 / 所有 agent 节点从 input 可达。
+ * 基础结构校验（PUT 编辑持久化时）：唯一 id / agentNodeKey 唯一 / 边引用合法 / 无自环 / 无重边 / 恰好一个 input / inputNode 指向 input。
  *
- * agentNodeKey 唯一（审核#7）：M2 禁止同一 agent 在一张图里出现多次，
- * 否则两节点共享同一 active-session.json 会上下文串味；多实例隔离留 M4。
+ * 注意：编辑期允许"中间非法态"——孤立 agent 节点（未连边）、暂未连通、入度>1 等，
+ * 这些是"可运行性"约束，由 validateRunnable 在运行前检查。这样用户可自由加节点/连边，运行时才卡。
+ *
+ * agentNodeKey 唯一（审核#7）：禁止同一 agent 在一张图里出现多次，否则共享 active session 串味；多实例隔离留 M4。
  */
 export function validateGraph(graph: Graph): void {
   const nodeIds = new Set<string>();
@@ -100,12 +101,7 @@ export function validateGraph(graph: Graph): void {
   const inputNode = inputNodes[0];
   if (graph.inputNode !== inputNode.id) throw new GraphValidationError(`inputNode '${graph.inputNode}' is not the input node`);
 
-  const inDegree = new Map<string, number>();
-  for (const n of graph.nodes) inDegree.set(n.id, 0);
   const edgeKeys = new Set<string>();
-  const adj = new Map<string, string[]>();
-  for (const n of graph.nodes) adj.set(n.id, []);
-
   for (const e of graph.edges) {
     if (!nodeIds.has(e.source)) throw new GraphValidationError(`edge source not found: ${e.source}`);
     if (!nodeIds.has(e.target)) throw new GraphValidationError(`edge target not found: ${e.target}`);
@@ -113,8 +109,23 @@ export function validateGraph(graph: Graph): void {
     const key = `${e.source}->${e.target}`;
     if (edgeKeys.has(key)) throw new GraphValidationError(`duplicate edge: ${key}`);
     edgeKeys.add(key);
-    inDegree.set(e.target, (inDegree.get(e.target) ?? 0) + 1);
+  }
+}
+
+/**
+ * 可运行性校验（POST /run/start 前）：无环 / agent 入度 ≤ 1(M1 串行) / 所有 agent 从 input 可达。
+ * 编辑态可不满足，但运行必须满足，否则 AgentRouter 拓扑执行会出错。
+ */
+export function validateRunnable(graph: Graph): void {
+  const adj = new Map<string, string[]>();
+  const inDegree = new Map<string, number>();
+  for (const n of graph.nodes) {
+    adj.set(n.id, []);
+    inDegree.set(n.id, 0);
+  }
+  for (const e of graph.edges) {
     adj.get(e.source)!.push(e.target);
+    inDegree.set(e.target, (inDegree.get(e.target) ?? 0) + 1);
   }
 
   // M1：agent 入度 ≤ 1（串行链；M4 放开为 fan-in reducer）
@@ -139,25 +150,22 @@ export function validateGraph(graph: Graph): void {
     for (const next of adj.get(id) ?? []) dfs(next);
     color.set(id, 2);
   };
-  dfs(inputNode.id);
+  dfs(graph.inputNode);
   if (hasCycle) throw new GraphValidationError('graph contains a cycle');
 
   // 所有 agent 节点从 input 可达
   const reachable = new Set<string>();
-  const bfs = (start: string): void => {
-    const queue = [start];
-    reachable.add(start);
-    while (queue.length > 0) {
-      const cur = queue.shift()!;
-      for (const next of adj.get(cur) ?? []) {
-        if (!reachable.has(next)) {
-          reachable.add(next);
-          queue.push(next);
-        }
+  const queue = [graph.inputNode];
+  reachable.add(graph.inputNode);
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    for (const next of adj.get(cur) ?? []) {
+      if (!reachable.has(next)) {
+        reachable.add(next);
+        queue.push(next);
       }
     }
-  };
-  bfs(inputNode.id);
+  }
   for (const n of graph.nodes) {
     if (n.type === 'agent' && !reachable.has(n.id)) {
       throw new GraphValidationError(`agent node '${n.id}' is not reachable from input`);

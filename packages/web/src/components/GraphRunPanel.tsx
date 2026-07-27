@@ -1,107 +1,52 @@
 'use client';
 
-import { useState, type KeyboardEvent } from 'react';
-import { useGraphRun } from '../hooks/useGraphRun';
+import type { CSSProperties } from 'react';
 import { useGraphRunStore } from '../stores/graphRunStore';
+import { GraphRunSocketBridge } from './GraphRunSocketBridge';
+import { useSocketConnection } from '../providers/SocketProvider';
 
+/**
+ * 图运行状态条（功能2：输入已移到画布输入节点）。
+ * - 常驻挂载 GraphRunSocketBridge（单订阅 + 注入 socket）。
+ * - 显示连接/运行状态 + 活跃节点数；运行中保留一个停止按钮兜底（确保可达）。
+ */
 export function GraphRunPanel() {
-  const { startRun, abortRun } = useGraphRun();
+  const { connected } = useSocketConnection();
   const status = useGraphRunStore((s) => s.status);
-  const graph = useGraphRunStore((s) => s.graph);
-  const [text, setText] = useState('');
-  const [err, setErr] = useState<string | null>(null);
+  const activeNodeIds = useGraphRunStore((s) => s.activeNodeIds);
+  const abortRun = useGraphRunStore((s) => s.abortRun);
   const busy = status === 'running';
 
-  const submit = async (): Promise<void> => {
-    if (!text.trim() || busy) return;
-    setErr(null);
-    try {
-      await startRun(text);
-    } catch (e) {
-      setErr((e as Error).message);
-    }
-    setText('');
-  };
-
-  const stop = async (): Promise<void> => {
-    try {
-      await abortRun();
-    } catch (e) {
-      setErr((e as Error).message);
-    }
-  };
-
-  const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      void submit();
-    }
-  };
-
-  const nodeCount = graph?.nodes.filter((n) => n.type === 'agent').length ?? 0;
+  const statusText = !connected
+    ? 'WebSocket 断开'
+    : busy
+      ? `运行中（执行中节点：${activeNodeIds.length || 0}）`
+      : status === 'done'
+        ? '运行完成'
+        : status === 'error'
+          ? '运行失败'
+          : '图已就绪';
 
   return (
     <div style={styles.bar}>
-      <div style={{ ...styles.state, color: busy ? 'var(--text-muted)' : 'var(--success)' }}>
-        <span style={{ ...styles.stateDot, background: busy ? 'var(--accent)' : 'var(--success)' }} />
-        {busy ? '图运行中…（可点击停止）' : `图已就绪（${nodeCount} 个 agent 节点，按拓扑序串行执行）`}
+      <GraphRunSocketBridge />
+      <div style={{ ...styles.state, color: busy ? 'var(--text-muted)' : connected ? 'var(--success)' : 'var(--danger)' }}>
+        <span style={{ ...styles.dot, background: busy ? 'var(--accent)' : connected ? 'var(--success)' : 'var(--danger)' }} />
+        {statusText}
       </div>
-      {err && <div style={styles.err}>{err}</div>}
-      <div style={styles.controls}>
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder={busy ? '运行完成后可再次启动' : '输入需求，按拓扑顺序触发多 CLI 协作…'}
-          rows={4}
-          style={{ ...styles.input, ...(busy ? styles.inputDisabled : {}) }}
-          disabled={busy}
-        />
-        {busy ? (
-          <button onClick={() => void stop()} style={{ ...styles.btn, ...styles.stopBtn }}>
-            停止
-          </button>
-        ) : (
-          <button
-            onClick={() => void submit()}
-            disabled={!text.trim()}
-            style={{ ...styles.btn, ...(!text.trim() ? styles.btnDisabled : {}) }}
-          >
-            运行图
-          </button>
-        )}
-      </div>
+      {busy && (
+        <button onClick={() => void abortRun()} style={{ ...styles.btn, ...styles.stopBtn }}>
+          停止
+        </button>
+      )}
     </div>
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  bar: { padding: 12, borderTop: '1px solid var(--border)' },
-  state: { display: 'flex', alignItems: 'center', gap: 6, minHeight: 20, marginBottom: 6, fontSize: 12 },
-  stateDot: { width: 7, height: 7, borderRadius: '50%', flexShrink: 0 },
-  err: { color: 'var(--danger)', fontSize: 12, marginBottom: 6 },
-  controls: { display: 'flex', gap: 8 },
-  input: {
-    flex: 1,
-    resize: 'none',
-    background: 'var(--surface-raised)',
-    color: 'var(--text)',
-    border: '1px solid var(--border)',
-    borderRadius: 6,
-    padding: '10px 12px',
-    fontSize: 16,
-    outline: 'none',
-  },
-  inputDisabled: { cursor: 'not-allowed', opacity: 0.65 },
-  btn: {
-    background: 'var(--accent)',
-    color: 'var(--accent-text)',
-    border: 'none',
-    borderRadius: 6,
-    padding: '0 20px',
-    fontSize: 14,
-    fontWeight: 600,
-  },
-  btnDisabled: { cursor: 'not-allowed', opacity: 0.55 },
-  stopBtn: { background: 'var(--danger)' },
+const styles: Record<string, CSSProperties> = {
+  bar: { padding: '8px 12px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 },
+  state: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, flex: 1 },
+  dot: { width: 7, height: 7, borderRadius: '50%', flexShrink: 0 },
+  btn: { background: 'var(--danger)', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 12px', fontSize: 12, cursor: 'pointer' },
+  stopBtn: {},
 };

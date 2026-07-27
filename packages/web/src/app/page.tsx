@@ -10,33 +10,32 @@ import { NodeConfigPanel } from '@/components/NodeConfigPanel';
 import { NodeSelector } from '@/components/NodeSelector';
 import { RunPicker } from '@/components/RunPicker';
 import { SessionPicker } from '@/components/SessionPicker';
+import { HSplit, VSplit } from '@/components/Splitter';
 import { useSocket } from '@/hooks/useSocket';
 import { useNodeHistory } from '@/hooks/useNodeHistory';
+import { useGraphRunStore } from '@/stores/graphRunStore';
 
 type Mode = 'node' | 'graph';
 const MODE_KEY = '0agentteams.mode';
-
-function readMode(): Mode {
-  if (typeof window === 'undefined') return 'node';
-  try {
-    const saved = window.localStorage.getItem(MODE_KEY);
-    return saved === 'graph' ? 'graph' : 'node';
-  } catch {
-    return 'node';
-  }
-}
 
 export default function Home() {
   const { connected } = useSocket();
   useNodeHistory();
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
-  const [mode, setMode] = useState<Mode>(readMode);
+  // 初始用 'node'，挂载后再从 localStorage 读取，避免 SSR/CSR 不一致导致 hydration 报错
+  const [mode, setMode] = useState<Mode>('node');
 
   useEffect(() => {
     const savedTheme = localStorage.getItem('theme');
     if (savedTheme === 'light') {
       setTheme('light');
       document.documentElement.dataset.theme = 'light';
+    }
+    try {
+      const savedMode = window.localStorage.getItem(MODE_KEY);
+      if (savedMode === 'graph') setMode('graph');
+    } catch {
+      // 浏览器存储不可用时保持默认
     }
   }, []);
 
@@ -97,35 +96,31 @@ export default function Home() {
         </div>
       </header>
       <div style={styles.body}>
-        <section style={styles.chat}>
-          {mode === 'node' ? (
-            <>
+        {mode === 'node' ? (
+          <>
+            <section style={styles.chat}>
               <MessageStream />
               <ChatInput />
-            </>
-          ) : (
-            <>
-              <GraphCanvas />
-              <GraphRunPanel />
-            </>
-          )}
-        </section>
-        <aside style={styles.side}>
-          {mode === 'node' ? (
-            <NodeConfigPanel />
-          ) : (
-            <div style={styles.graphSide}>
-              <div style={styles.sideTitle}>图运行流</div>
-              <div style={styles.streamWrap}>
-                <GraphRunStream />
-              </div>
-              <div style={styles.sideTitle}>运行历史</div>
-              <div style={styles.runPickerWrap}>
-                <RunPicker />
-              </div>
-            </div>
-          )}
-        </aside>
+            </section>
+            <aside style={styles.side}>
+              <NodeConfigPanel />
+            </aside>
+          </>
+        ) : (
+          <HSplit
+            left={
+              <section style={styles.chat}>
+                <GraphCanvas />
+                <GraphRunPanel />
+              </section>
+            }
+            right={
+              <aside style={styles.sideFill}>
+                <VSplit top={<GraphRunStream />} bottom={<GraphSideBottom />} />
+              </aside>
+            }
+          />
+        )}
       </div>
     </main>
   );
@@ -168,9 +163,81 @@ const styles: Record<string, React.CSSProperties> = {
   body: { flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' },
   chat: { flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)' },
   side: { width: 380, minHeight: 0, flexShrink: 0, overflow: 'hidden', borderLeft: '1px solid var(--border)' },
-  graphSide: { height: '100%', display: 'flex', flexDirection: 'column' },
-  sideTitle: { padding: '10px 14px 4px', fontSize: 12, color: 'var(--text-muted)', borderBottom: '1px solid var(--border)' },
-  streamWrap: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' },
-  runPickerWrap: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--border)' },
-  sidePlaceholder: { color: 'var(--text-faint)', fontSize: 13, padding: 16 },
+  sideFill: { flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', height: '100%' },
+};
+
+/** 图模式右侧底部：[运行历史 / 节点配置] 标签切换；点 agent 节点自动切到配置 */
+function GraphSideBottom() {
+  const selected = useGraphRunStore((s) => s.selectedAgentNodeKey);
+  const setSelected = useGraphRunStore((s) => s.setSelectedAgentNodeKey);
+  const graph = useGraphRunStore((s) => s.graph);
+  const [tab, setTab] = useState<'history' | 'config'>('history');
+
+  // 点 agent 节点 → 自动切到配置
+  useEffect(() => {
+    if (selected) setTab('config');
+  }, [selected]);
+
+  // 配置 tab 默认展示选中节点；未选则取图中第一个 agent
+  const configKey = selected ?? graph?.nodes.find((n) => n.type === 'agent')?.agentNodeKey ?? null;
+
+  return (
+    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--border)' }}>
+      <div style={tabBarStyle}>
+        <button style={{ ...tabBtnStyle, ...(tab === 'history' ? tabBtnActiveStyle : {}) }} onClick={() => setTab('history')}>
+          运行历史
+        </button>
+        <button style={{ ...tabBtnStyle, ...(tab === 'config' ? tabBtnActiveStyle : {}) }} onClick={() => setTab('config')}>
+          节点配置
+        </button>
+        {selected && (
+          <button style={backBtnStyle} onClick={() => setSelected(null)}>
+            取消选择
+          </button>
+        )}
+      </div>
+      <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+        {tab === 'history' ? (
+          <RunPicker />
+        ) : configKey ? (
+          <NodeConfigPanel nodeKey={configKey} />
+        ) : (
+          <div style={{ color: 'var(--text-faint)', fontSize: 13, padding: 16 }}>画布上还没有 agent 节点。</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const tabBarStyle: React.CSSProperties = {
+  display: 'flex',
+  gap: 4,
+  padding: '6px 10px',
+  borderBottom: '1px solid var(--border)',
+  alignItems: 'center',
+};
+const tabBtnStyle: React.CSSProperties = {
+  background: 'var(--surface-raised)',
+  color: 'var(--text-muted)',
+  border: '1px solid var(--border)',
+  borderRadius: 4,
+  padding: '4px 10px',
+  fontSize: 12,
+  cursor: 'pointer',
+};
+const tabBtnActiveStyle: React.CSSProperties = {
+  color: 'var(--text-strong)',
+  background: 'var(--accent)',
+  fontWeight: 600,
+  borderColor: 'var(--accent)',
+};
+const backBtnStyle: React.CSSProperties = {
+  marginLeft: 'auto',
+  background: 'transparent',
+  color: 'var(--text-muted)',
+  border: '1px solid var(--border)',
+  borderRadius: 4,
+  padding: '3px 8px',
+  fontSize: 11,
+  cursor: 'pointer',
 };

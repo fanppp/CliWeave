@@ -96,8 +96,9 @@ function FileEditor({ title, hint, initial, save }: EditorProps) {
   );
 }
 
-export function NodeConfigPanel() {
+export function NodeConfigPanel({ nodeKey: nodeKeyProp }: { nodeKey?: string } = {}) {
   const activeNodeId = useChatStore((s) => s.activeNodeId);
+  const nodeKey = nodeKeyProp ?? activeNodeId;
   const [detail, setDetail] = useState<NodeDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
@@ -106,16 +107,16 @@ export function NodeConfigPanel() {
 
   useEffect(() => {
     setLoading(true);
-    fetch(`${API_URL}/api/agents/${encodeURIComponent(activeNodeId)}`)
+    fetch(`${API_URL}/api/agents/${encodeURIComponent(nodeKey)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => { setDetail(d); setLoading(false); })
       .catch(() => { setDetail(null); setLoading(false); });
-  }, [activeNodeId, reloadKey]);
+  }, [nodeKey, reloadKey]);
 
   const reload = (): void => setReloadKey((k) => k + 1);
 
   const saveIdentity = async (content: string): Promise<boolean> => {
-    const r = await fetch(`${API_URL}/api/agents/${encodeURIComponent(activeNodeId)}/identity`, {
+    const r = await fetch(`${API_URL}/api/agents/${encodeURIComponent(nodeKey)}/identity`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content }),
     });
@@ -124,7 +125,7 @@ export function NodeConfigPanel() {
   };
 
   const saveRule = (file: string) => async (content: string): Promise<boolean> => {
-    const r = await fetch(`${API_URL}/api/agents/${encodeURIComponent(activeNodeId)}/rules`, {
+    const r = await fetch(`${API_URL}/api/agents/${encodeURIComponent(nodeKey)}/rules`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ file, content }),
     });
@@ -140,9 +141,9 @@ export function NodeConfigPanel() {
     }
     const dir = detail && detail.rules.length > 0
       ? ruleDir(detail.rules[0].file)
-      : deriveRuleDir(activeNodeId);
+      : deriveRuleDir(nodeKey);
     const file = `${dir}${name}`;
-    const r = await fetch(`${API_URL}/api/agents/${encodeURIComponent(activeNodeId)}/rules`, {
+    const r = await fetch(`${API_URL}/api/agents/${encodeURIComponent(nodeKey)}/rules`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ file, content: `# ${name.replace(/\.md$/, '')} 规则\n\n` }),
     });
@@ -163,7 +164,7 @@ export function NodeConfigPanel() {
 
       <h4 style={styles.h2}>身份 (identity)</h4>
       <FileEditor
-        key={`identity-${activeNodeId}`}
+        key={`identity-${nodeKey}`}
         title="identity.md"
         initial={detail.identity ?? ''}
         save={saveIdentity}
@@ -177,7 +178,7 @@ export function NodeConfigPanel() {
           const name = r.file.split(/[\\/]/).pop() ?? r.file;
           return (
             <FileEditor
-              key={`${activeNodeId}:${r.file}`}
+              key={`${nodeKey}:${r.file}`}
               title={name}
               hint={r.file}
               initial={r.content}

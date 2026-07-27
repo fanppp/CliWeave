@@ -11,32 +11,45 @@
       }
     },
     {
-      "id": "n1",
+      "id": "nms2m5ask",
       "type": "agent",
-      "agentNodeKey": "codex:codex-node",
+      "agentNodeKey": "claude:reviewer",
       "position": {
-        "x": 224.0935046535248,
-        "y": -29.56966450884075
+        "x": 484.53766135145577,
+        "y": 135.17208102006757
       }
     },
     {
-      "id": "n2",
+      "id": "nms2m5egx",
       "type": "agent",
-      "agentNodeKey": "claude:claude-node",
+      "agentNodeKey": "codex:coder",
       "position": {
-        "x": 482.04675232676243,
-        "y": -29.569664508840763
+        "x": 289.1652867287572,
+        "y": 32.34777038002505
+      }
+    },
+    {
+      "id": "nms2m600q",
+      "type": "agent",
+      "agentNodeKey": "opencode:testing",
+      "position": {
+        "x": 524.788844147907,
+        "y": 262.59299590550705
       }
     }
   ],
   "edges": [
     {
-      "source": "__input__",
-      "target": "n1"
+      "source": "nms2m5egx",
+      "target": "nms2m5ask"
     },
     {
-      "source": "n1",
-      "target": "n2"
+      "source": "nms2m5ask",
+      "target": "nms2m600q"
+    },
+    {
+      "source": "__input__",
+      "target": "nms2m5egx"
     }
   ]
 }
