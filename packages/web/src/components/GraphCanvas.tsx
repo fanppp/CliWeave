@@ -165,7 +165,7 @@ function toFlowEdges(graph: Graph | null, backIds: Set<string>): FlowEdge[] {
       targetHandle: isBack ? 'back-in' : 'in',
       markerEnd: { type: MarkerType.ArrowClosed },
       style: isBack ? { stroke: '#f87171', strokeDasharray: '6 4' } : { stroke: '#9aa3ad' },
-      label: isBack ? `回边${e.maxIterations ? `·${e.maxIterations}` : '·3'}` : '',
+      label: isBack ? `回边${e.maxIterations ? `·${e.maxIterations}` : '·1'}` : '',
       labelStyle: { fill: '#f87171', fontSize: 10 },
       ...(e.maxIterations != null ? { maxIterations: e.maxIterations } : {}),
     } as FlowEdge;
@@ -188,6 +188,8 @@ export function GraphCanvas() {
   const [picker, setPicker] = useState(false);
   const [selEdge, setSelEdge] = useState<FlowEdge | null>(null);
   const skipCommit = useRef(true);
+  // 仅结构变更（增删/移动/连边）才提交；纯选中不触发 save（否则 save 回环重建边会丢选中）
+  const dirtyRef = useRef(false);
 
   // 回边集（随 nodes/edges 变化重算，用于边样式 + 面板标签）
   const backIds = useMemo(() => computeBackEdgeIds(nodes, edges), [nodes, edges]);
@@ -214,6 +216,8 @@ export function GraphCanvas() {
   const commit = useCallback((ns: Node[], es: FlowEdge[]) => {
     if (skipCommit.current) return;
     if (ns.length === 0) return;
+    if (!dirtyRef.current) return; // 选中/样式等非结构变更不保存
+    dirtyRef.current = false;
     void saveGraph(buildGraph(ns, es));
   }, [saveGraph]);
 
@@ -228,17 +232,22 @@ export function GraphCanvas() {
     setEdges((eds) => {
       // 同向重复（如已有 A→B 又画 A→B）静默忽略，避免落 400 后画布残留坏边
       if (eds.some((e) => e.source === c.source && e.target === c.target)) return eds;
-      return addEdge<FlowEdge>({ ...c, id: `e${Date.now().toString(36)}`, markerEnd: { type: MarkerType.ArrowClosed } }, eds);
+      return addEdge<FlowEdge>({ ...c, id: `${c.source}->${c.target}`, markerEnd: { type: MarkerType.ArrowClosed } }, eds);
     });
+    dirtyRef.current = true;
   }, [setEdges]);
 
   const handleNodesChange = useCallback((changes: NodeChange[]) => {
     onNodesChange(changes);
+    if (changes.some((c) => c.type !== 'select')) dirtyRef.current = true;
     const removed = new Set(changes.filter((c) => c.type === 'remove').map((c) => (c as { id: string }).id));
     if (removed.size > 0) setEdges((es) => es.filter((e) => !removed.has(e.source) && !removed.has(e.target)));
   }, [onNodesChange, setEdges]);
 
-  const handleEdgesChange = useCallback((changes: EdgeChange[]) => { onEdgesChange(changes); }, [onEdgesChange]);
+  const handleEdgesChange = useCallback((changes: EdgeChange[]) => {
+    onEdgesChange(changes);
+    if (changes.some((c) => c.type !== 'select')) dirtyRef.current = true;
+  }, [onEdgesChange]);
 
   const handlePaneClick = useCallback(() => {
     setSelectedGraphNodeId(null); setSelectedAgentNodeKey(null); setSelEdge(null);
@@ -250,6 +259,7 @@ export function GraphCanvas() {
     setNodes((ns) => ns.filter((n) => !(n.selected && (n.data as unknown as NodeData).kind !== 'input' && (n.data as unknown as NodeData).kind !== 'end')));
     setEdges((es) => es.filter((e) => !e.selected));
     setSelEdge(null);
+    dirtyRef.current = true;
   }, [setNodes, setEdges]);
 
   const onEdgeClick = useCallback((_: unknown, edge: Edge) => {
@@ -270,6 +280,7 @@ export function GraphCanvas() {
     const idx = nodes.length;
     setNodes((ns) => [...ns, { id, type: 'agent', position: { x: 320, y: 80 + idx * 140 }, data, deletable: true } as Node]);
     setPicker(false);
+    dirtyRef.current = true;
   }, [setNodes, nodes.length]);
 
   const addEndNode = useCallback(() => {
@@ -277,6 +288,7 @@ export function GraphCanvas() {
     const id = `end_${Date.now().toString(36)}`;
     const idx = nodes.length;
     setNodes((ns) => [...ns, { id, type: 'end', position: { x: 320, y: 80 + idx * 140 }, data: { label: '结束', kind: 'end' }, deletable: false } as Node]);
+    dirtyRef.current = true;
   }, [nodes, setNodes]);
 
   // 选中边编辑 maxIterations（仅回边有意义；前向边无需）
@@ -284,10 +296,23 @@ export function GraphCanvas() {
     if (!selEdge) return;
     setEdges((es) => es.map((e) => e.id === selEdge.id ? { ...e, ...(maxIterations != null ? { maxIterations } : {}) } : e));
     setSelEdge((se) => se ? { ...se, ...(maxIterations != null ? { maxIterations } : {}) } : se);
+    dirtyRef.current = true;
   }, [selEdge, setEdges]);
 
   const graphNodes = useMemo(() => graph?.nodes ?? [], [graph]);
   const selEdgeIsBack = selEdge ? backIds.has(selEdge.id) : false;
+  // 节点 id → 可读标签（取画布节点 data.label；input/end 用中文）
+  const labelOf = useCallback(
+    (id: string): string => {
+      const n = nodes.find((x) => x.id === id);
+      const label = n ? (n.data as unknown as NodeData).label : undefined;
+      if (label) return label;
+      if (id === '__input__') return '输入';
+      if (id === '__end__') return '结束';
+      return id;
+    },
+    [nodes],
+  );
 
   return (
     <div style={styles.wrap}>
@@ -295,7 +320,7 @@ export function GraphCanvas() {
         <button style={styles.btn} onClick={() => setPicker((v) => !v)}>+ 加入节点</button>
         <button style={{ ...styles.btn, background: 'var(--surface-raised)', color: 'var(--text)' }} onClick={() => void addEndNode()}>+ 结束节点</button>
         <button style={{ ...styles.btn, background: 'var(--surface-raised)', color: 'var(--text)' }} onClick={deleteSelected}>删除选中</button>
-        <span style={styles.hint}>前向边：上节点底部 → 下节点顶部。回边：从下节点左侧 back-out 拖到上节点左侧 back-in（向上=不满足→回），默认返工3次。</span>
+        <span style={styles.hint}>前向边：上节点底部 → 下节点顶部。回边：从下节点左侧 back-out 拖到上节点左侧 back-in（向上=不满足→回），默认覆盖1次（返工1轮）。</span>
       </div>
       {saveError && <div style={styles.errBanner} title={saveError}>⚠ {saveError}</div>}
       {picker && (
@@ -313,12 +338,13 @@ export function GraphCanvas() {
       )}
       {selEdge && (
         <div style={styles.edgePanel}>
-          <strong style={{ fontSize: 11 }}>边 {selEdge.id}</strong>
+          <strong style={{ fontSize: 11 }}>{labelOf(selEdge.source)} → {labelOf(selEdge.target)}</strong>
+          <div style={{ fontSize: 10, color: 'var(--text-faint)' }}>id: {selEdge.id}</div>
           <div style={{ fontSize: 10, color: selEdgeIsBack ? 'var(--danger)' : 'var(--text-faint)' }}>
             {selEdgeIsBack ? '↩ 回边（不满足→回到目标；决策点会解析 VERDICT）' : '→ 前向边（满意→继续）'}
           </div>
           {selEdgeIsBack && (
-            <label style={styles.edgeLabel}>maxIterations（空=默认3）
+            <label style={styles.edgeLabel}>maxIterations（空=默认1）
               <input className='nodrag' style={styles.edgeInput} type='number' min={1} value={selEdge.maxIterations ?? ''} onChange={(e) => updateEdge(e.target.value === '' ? null : Math.max(1, Number(e.target.value)))} />
             </label>
           )}
@@ -356,7 +382,7 @@ function buildGraph(nodes: Node[], edges: FlowEdge[]): Graph {
     if (data.kind === 'end') return { ...base, type: 'end' } as GraphNode;
     return { ...base, type: 'agent', agentNodeKey: data.agentNodeKey ?? '' } as GraphNode;
   });
-  const graphEdges: GraphEdge[] = edges.map((e) => ({ id: e.id, source: e.source, target: e.target, ...(e.maxIterations != null ? { maxIterations: e.maxIterations } : {}) }));
+  const graphEdges: GraphEdge[] = edges.map((e) => ({ id: `${e.source}->${e.target}`, source: e.source, target: e.target, ...(e.maxIterations != null ? { maxIterations: e.maxIterations } : {}) }));
   const inputNode = graphNodes.find((n) => n.type === 'input')?.id ?? '__input__';
   const endNode = graphNodes.find((n) => n.type === 'end')?.id;
   return { schemaVersion: 3, inputNode, ...(endNode ? { endNode } : {}), nodes: graphNodes, edges: graphEdges };

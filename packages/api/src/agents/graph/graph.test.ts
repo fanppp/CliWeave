@@ -39,10 +39,18 @@ describe('validateGraph 编辑期约束', () => {
     assert.throws(() => validateGraph(g), /in-degree 0/);
   });
 
-  it('input 0 出边允许（编辑期）；运行期要求恰好 1', () => {
+  it('input 0 出边允许（编辑期）；运行期要求 ≥1', () => {
     const g = graph(baseNodes, [], { endNode: '__end__' });
     validateGraph(g);
-    assert.throws(() => validateRunnable(g), /exactly one out-edge to run/);
+    assert.throws(() => validateRunnable(g), /at least one out-edge to run/);
+  });
+
+  it('input 扇出多条前向出边通过（并行多个首层）', () => {
+    const nodes = [...baseNodes, agent('C', 'codex:coder2')];
+    const g = graph(nodes, [edge('e1', '__input__', 'A'), edge('e1b', '__input__', 'C'), edge('e2', 'A', 'B'), edge('e3', 'B', '__end__')], { endNode: '__end__' });
+    validateGraph(g);
+    validateRunnable(g);
+    assert.ok(true);
   });
 
   it('end 出度必须 0', () => {

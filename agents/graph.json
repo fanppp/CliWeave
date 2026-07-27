@@ -41,25 +41,24 @@
   ],
   "edges": [
     {
-      "id": "ems2x7u9y",
+      "id": "__input__->A",
       "source": "__input__",
       "target": "A"
     },
     {
-      "id": "ems2x82z3",
+      "id": "A->B",
       "source": "A",
       "target": "B"
     },
     {
-      "id": "ems2xnb94",
+      "id": "B->__end__",
       "source": "B",
       "target": "__end__"
     },
     {
-      "id": "ems2xzq42",
+      "id": "B->A",
       "source": "B",
-      "target": "A",
-      "maxIterations": 2
+      "target": "A"
     }
   ]
 }

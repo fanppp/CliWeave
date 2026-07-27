@@ -6,8 +6,8 @@
  * 单路径：每节点 ≤1 前向 + ≤1 回边。fan-out 留 M4b。
  *
  * 终态（finish guard 各最多一次）：
- * - 到 endNode / 无前向边 → run_done(completed, finalText=最后生产者输出||最后完成输出)。
- * - 回边 target 已跑满 maxIterations 次 → run_done(edge_limit, 最后生产者输出)；无生产者输出 → run_error。
+ * - 到 endNode / 无前向边 → run_done(completed, finalText=各分支最后生产者产出拼接||最后完成输出)。
+ * - 回边覆盖次数达 maxIterations（默认1）→ run_done(edge_limit, 最后生产者产出)；无生产者输出 → run_error。
  * - 决策点未取到 verdict → 当不满意（走回边，靠 maxIter 兜底）。
  */
 import { buildAgent, getActiveSession, setActiveSession } from '../AgentServiceFactory.js';
@@ -98,7 +98,7 @@ function buildPrompt(node: GraphAgentNode, trail: TrailEntry[], input: string, i
   return input;
 }
 
-/** 单路径条件游走（可注入 exec 用于测试）。 */
+/** 单路径条件游走（可注入 exec 用于测试）。input 可扇出多条前向出边 → 并行跑多个首层分支，各自产出后图结束（无汇合）。 */
 export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptions, exec: ExecNode = runAgentNode): Promise<void> {
   const { runId, emit, signal } = opts;
   const inputNode = graph.nodes.find((n) => n.id === graph.inputNode);
@@ -123,106 +123,115 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
   emit({ type: 'node_message', runId, nodeId: inputNode.id, message: { type: 'text', nodeId: inputNode.id, content: prompt, timestamp: ts() } as AgentMessage });
   emit({ type: 'node_done', runId, nodeId: inputNode.id });
 
-  const inputOut = graph.edges.find((e) => e.source === inputNode.id);
-  if (!inputOut) {
+  const inputOuts = graph.edges.filter((e) => e.source === inputNode.id);
+  if (inputOuts.length === 0) {
     finish({ type: 'run_error', runId, error: 'input node has no out-edge' });
     return;
   }
 
-  let lastProducerOutput = '';
-  let lastCompletedOutput = '';
-  const trail: TrailEntry[] = [];
+  // 分支间共享：节点迭代计数、回边覆盖计数、全局执行上限、最后完成输出（兜底）
   const nodeIter = new Map<string, number>();
+  const edgeCount = new Map<string, number>();
   let totalExec = 0;
+  let lastCompletedOutput = '';
 
-  let worklist: { nodeId: string; prompt: string }[] = [{ nodeId: inputOut.target, prompt }];
+  type BranchResult =
+    | { status: 'completed'; output: string }
+    | { status: 'edge_limit'; output: string; reason: string }
+    | { status: 'global_limit'; output: string }
+    | { status: 'aborted' }
+    | { status: 'error'; error: string };
 
-  while (worklist.length > 0) {
-    const { nodeId, prompt: nodePrompt } = worklist.shift()!;
-    if (signal?.aborted) {
-      finish({ type: 'run_aborted', runId });
-      return;
-    }
-    if (++totalExec > maxExec) {
-      finish({ type: 'run_done', runId, finalText: lastProducerOutput || lastCompletedOutput, termination: 'global_limit', reason: `exceeded maxNodeExecutions ${maxExec}` });
-      return;
-    }
+  /** 单路径分支游走：决策点解析 verdict→满意前向/不满意回边；回边 target 跑满 maxIter → edge_limit。 */
+  async function walkBranch(startId: string, branchPrompt: string): Promise<BranchResult> {
+    let nodeId = startId;
+    let curPrompt = branchPrompt;
+    const trail: TrailEntry[] = [];
+    let lastProducer = '';
+    while (true) {
+      if (signal?.aborted) return { status: 'aborted' };
+      if (++totalExec > maxExec) return { status: 'global_limit', output: lastProducer };
+      const node = byId.get(nodeId);
+      if (!node || node.type !== 'agent') return { status: 'completed', output: lastProducer };
 
-    const node = byId.get(nodeId);
-    if (!node || node.type !== 'agent') {
-      finish({ type: 'run_error', runId, error: `walk reached non-agent node: ${nodeId}` });
-      return;
-    }
+      const iter = (nodeIter.get(nodeId) ?? 0) + 1;
+      nodeIter.set(nodeId, iter);
+      emit({ type: 'node_iteration', runId, nodeId, iteration: iter });
 
-    const iter = (nodeIter.get(nodeId) ?? 0) + 1;
-    nodeIter.set(nodeId, iter);
-    emit({ type: 'node_iteration', runId, nodeId, iteration: iter });
+      const outs = graph.edges.filter((e) => e.source === nodeId);
+      const forward = outs.filter((e) => !isBack(e));
+      const backs = outs.filter((e) => isBack(e));
+      const isDecision = backs.length > 0;
 
-    const outs = graph.edges.filter((e) => e.source === nodeId);
-    const forward = outs.filter((e) => !isBack(e));
-    const backs = outs.filter((e) => isBack(e));
-    const isDecision = backs.length > 0;
+      const outcome = await exec(node, curPrompt, opts);
+      if (outcome.status === 'aborted') return { status: 'aborted' };
+      if (outcome.status === 'error') return { status: 'error', error: outcome.error ?? `node '${nodeId}' failed` };
+      const finalText = outcome.finalText ?? '';
 
-    const outcome = await exec(node, nodePrompt, opts);
-    if (outcome.status === 'aborted') {
-      finish({ type: 'run_aborted', runId });
-      return;
-    }
-    if (outcome.status === 'error') {
-      finish({ type: 'run_error', runId, error: `node '${nodeId}' failed: ${outcome.error}` });
-      return;
-    }
-    const finalText = outcome.finalText ?? '';
+      const vctx: VerdictContext = { runId, nodeId, iteration: iter, finalText, trail };
+      const verdict: Verdict | null = isDecision ? extractVerdict(node, vctx) : null;
+      trail.push({ nodeId, output: finalText, verdict: verdict ?? undefined, iter });
+      lastCompletedOutput = finalText;
+      if (!isDecision) lastProducer = finalText;
 
-    const vctx: VerdictContext = { runId, nodeId, iteration: iter, finalText, trail };
-    const verdict: Verdict | null = isDecision ? extractVerdict(node, vctx) : null;
-    trail.push({ nodeId, output: finalText, verdict: verdict ?? undefined, iter });
-    lastCompletedOutput = finalText;
-    if (!isDecision) lastProducerOutput = finalText;
+      // 选边：决策点 满意→前向；不满意→回边。透传→前向。
+      const chosen: GraphEdge | undefined = isDecision
+        ? (verdict?.approved === true ? forward[0] : backs[0])
+        : forward[0];
+      if (!chosen) return { status: 'completed', output: lastProducer };
 
-    // 选边：决策点 满意→前向；不满意→回边。透传→前向。
-    let chosen: GraphEdge | undefined;
-    if (isDecision) {
-      if (verdict?.approved === true) chosen = forward[0]; // 满意→前向
-      else chosen = backs[0]; // 不满意（含未取到 verdict）→回边
-    } else {
-      chosen = forward[0]; // 透传→前向
-    }
-
-    if (!chosen) {
-      // 无可走边：透传节点无前向→自然结束；决策点满意但无前向→结束
-      finish({ type: 'run_done', runId, finalText: lastProducerOutput || lastCompletedOutput, termination: 'completed' });
-      return;
-    }
-
-    // 回边：返工目标节点已跑满 maxIterations 次 → edge_limit（采用最后生产者输出；无则 run_error）
-    if (isBack(chosen)) {
-      const cap = chosen.maxIterations ?? DEFAULT_BACK_EDGE_MAX_ITER;
-      const targetRan = nodeIter.get(chosen.target) ?? 0;
-      if (targetRan >= cap) {
-        if (lastProducerOutput) {
-          finish({ type: 'run_done', runId, finalText: lastProducerOutput, termination: 'edge_limit', reason: `node '${chosen.target}' reached maxIterations ${cap}` });
-        } else {
-          finish({ type: 'run_error', runId, error: `node '${chosen.target}' reached maxIterations ${cap} with no producer output` });
+      // 回边：该边覆盖次数达 maxIterations → 该分支 edge_limit（采用本分支最后生产者输出）
+      if (isBack(chosen)) {
+        const cap = chosen.maxIterations ?? DEFAULT_BACK_EDGE_MAX_ITER;
+        const used = edgeCount.get(chosen.id) ?? 0;
+        if (used >= cap) {
+          return { status: 'edge_limit', output: lastProducer, reason: `back-edge '${chosen.id}' reached maxIterations ${cap}` };
         }
-        return;
+        edgeCount.set(chosen.id, used + 1);
+        const targetNode = byId.get(chosen.target);
+        if (!targetNode || targetNode.type !== 'agent') return { status: 'completed', output: lastProducer };
+        nodeId = chosen.target;
+        curPrompt = buildPrompt(targetNode, trail, prompt, graph.edges.some((e) => e.source === chosen.target && isBack(e)));
+        continue;
       }
-    }
 
-    if (graph.endNode && chosen.target === graph.endNode) {
-      finish({ type: 'run_done', runId, finalText: lastProducerOutput || lastCompletedOutput, termination: 'completed' });
-      return;
+      // 前向
+      if (graph.endNode && chosen.target === graph.endNode) return { status: 'completed', output: lastProducer };
+      const targetNode = byId.get(chosen.target);
+      if (!targetNode || targetNode.type !== 'agent') return { status: 'completed', output: lastProducer };
+      nodeId = chosen.target;
+      curPrompt = buildPrompt(targetNode, trail, prompt, graph.edges.some((e) => e.source === chosen.target && isBack(e)));
     }
-    const targetNode = byId.get(chosen.target);
-    if (!targetNode || targetNode.type !== 'agent') {
-      // target 是 end 但未配 endNode，或非 agent → 视为结束
-      finish({ type: 'run_done', runId, finalText: lastProducerOutput || lastCompletedOutput, termination: 'completed' });
-      return;
-    }
-    worklist = [{ nodeId: chosen.target, prompt: buildPrompt(targetNode, trail, prompt, graph.edges.some((e) => e.source === chosen!.target && isBack(e))) }];
   }
 
-  finish({ type: 'run_done', runId, finalText: lastProducerOutput || lastCompletedOutput, termination: 'completed' });
+  // 并行跑所有首层分支
+  const results = await Promise.all(inputOuts.map((e) => walkBranch(e.target, prompt)));
+
+  if (results.some((r) => r.status === 'aborted')) {
+    finish({ type: 'run_aborted', runId });
+    return;
+  }
+  const errRes = results.find((r): r is Extract<BranchResult, { status: 'error' }> => r.status === 'error');
+  if (errRes) {
+    finish({ type: 'run_error', runId, error: errRes.error });
+    return;
+  }
+  const glRes = results.find((r): r is Extract<BranchResult, { status: 'global_limit' }> => r.status === 'global_limit');
+  if (glRes) {
+    finish({ type: 'run_done', runId, finalText: glRes.output || lastCompletedOutput, termination: 'global_limit', reason: `exceeded maxNodeExecutions ${maxExec}` });
+    return;
+  }
+  // 各分支产出用 --- 拼接；无任何产出 → 兜底最后完成输出
+  const finalText = results
+    .filter((r): r is Extract<BranchResult, { output: string }> => 'output' in r && r.output !== '')
+    .map((r) => r.output)
+    .join('\n\n---\n\n') || lastCompletedOutput;
+  const elRes = results.find((r): r is Extract<BranchResult, { status: 'edge_limit' }> => r.status === 'edge_limit');
+  if (elRes) {
+    finish({ type: 'run_done', runId, finalText, termination: 'edge_limit', reason: elRes.reason });
+  } else {
+    finish({ type: 'run_done', runId, finalText, termination: 'completed' });
+  }
 }
 
 export async function executeGraph(prompt: string, graph: Graph, opts: ExecuteOptions): Promise<void> {

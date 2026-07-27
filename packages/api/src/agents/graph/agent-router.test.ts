@@ -71,19 +71,19 @@ describe('walkGraph 纯方向驱动', () => {
     assert.equal(calls.filter((c) => c === 'A').length, 3);
   });
 
-  it('回边达 maxIter=2 → run_done edge_limit 采用最后生产者版本（A 跑满 2 次）', async () => {
-    const ev = await runWalkAsync(makeGraph(2), makeExec(['1', '2'], ['REJECT', 'REJECT']));
+  it('回边覆盖次数达 maxIter=2 → run_done edge_limit（A 跑 1+2=3 次，采用最后生产者版本）', async () => {
+    const ev = await runWalkAsync(makeGraph(2), makeExec(['1', '2', '3'], ['REJECT', 'REJECT', 'REJECT']));
     const t = terminal(ev) as { type: string; termination: string; finalText: string };
     assert.equal(t.type, 'run_done');
     assert.equal(t.termination, 'edge_limit');
-    assert.equal(t.finalText, 'A-output-2');
+    assert.equal(t.finalText, 'A-output-3');
   });
 
   it('缺 verdict（非 APPROVE/REJECT）→ 当不满意走回边', async () => {
     const ev = await runWalkAsync(makeGraph(2), makeExec(['1', '2', '3'], ['XXX', 'XXX', 'XXX']));
     const t = terminal(ev) as { type: string; termination: string };
     assert.equal(t.type, 'run_done');
-    assert.equal(t.termination, 'edge_limit'); // 2 次后达上限
+    assert.equal(t.termination, 'edge_limit'); // 覆盖 2 次后达上限
   });
 
   it('决策点满意但无前向边 → run_done completed', async () => {
@@ -125,13 +125,47 @@ describe('walkGraph 纯方向驱动', () => {
     assert.ok(done.finalText !== undefined);
   });
 
-  it('默认 maxIter=3（回边未配 maxIterations）', async () => {
-    const g = makeGraph(undefined); // e4 无 maxIterations → 默认 3
-    const ev = await runWalkAsync(g, makeExec(['1', '2', '3', '4'], ['REJECT', 'REJECT', 'REJECT', 'REJECT']));
+  it('默认 maxIter=1（回边未配 maxIterations）', async () => {
+    const g = makeGraph(undefined); // e4 无 maxIterations → 默认 1
+    const ev = await runWalkAsync(g, makeExec(['1', '2'], ['REJECT', 'REJECT']));
     const t = terminal(ev) as { type: string; termination: string; reason?: string };
     assert.equal(t.type, 'run_done');
     assert.equal(t.termination, 'edge_limit');
-    assert.match(t.reason ?? '', /maxIterations 3/);
+    assert.match(t.reason ?? '', /maxIterations 1/);
+  });
+
+  it('input 扇出 → A/B 并行各跑一次，finalText 含两者产出', async () => {
+    const g: Graph = {
+      schemaVersion: 3, inputNode: '__input__', endNode: '__end__', maxNodeExecutions: 50,
+      nodes: [
+        { id: '__input__', type: 'input' },
+        { id: 'A', type: 'agent', agentNodeKey: 'codex:coder' },
+        { id: 'B', type: 'agent', agentNodeKey: 'claude:claude-node' },
+        { id: '__end__', type: 'end' },
+      ],
+      edges: [
+        { id: '__input__->A', source: '__input__', target: 'A' },
+        { id: '__input__->B', source: '__input__', target: 'B' },
+        { id: 'A->__end__', source: 'A', target: '__end__' },
+        { id: 'B->__end__', source: 'B', target: '__end__' },
+      ],
+    };
+    const calls: string[] = [];
+    const exec: ExecNode = async (node, _p, opts) => {
+      calls.push(node.id);
+      opts.emit({ type: 'node_started', runId: opts.runId, nodeId: node.id });
+      const finalText = `${node.id}-out`;
+      opts.emit({ type: 'node_message', runId: opts.runId, nodeId: node.id, message: { type: 'text', nodeId: node.id, content: finalText, timestamp: Date.now() } });
+      opts.emit({ type: 'node_done', runId: opts.runId, nodeId: node.id });
+      return { status: 'ok', finalText };
+    };
+    const ev = await runWalkAsync(g, exec);
+    const done = ev.find((e) => e.type === 'run_done') as { termination: string; finalText: string };
+    assert.equal(done.termination, 'completed');
+    assert.equal(calls.filter((c) => c === 'A').length, 1);
+    assert.equal(calls.filter((c) => c === 'B').length, 1);
+    assert.ok(done.finalText.includes('A-out'));
+    assert.ok(done.finalText.includes('B-out'));
   });
 });
 

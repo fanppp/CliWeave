@@ -51,8 +51,8 @@ export type GraphNode = z.infer<typeof V3NodeSchema>;
 export type GraphEdge = z.infer<typeof V3EdgeSchema>;
 export type GraphAgentNode = Extract<GraphNode, { type: 'agent' }>;
 
-/** 默认最大返工轮次（回边未配 maxIterations 时用）。 */
-export const DEFAULT_BACK_EDGE_MAX_ITER = 3;
+/** 默认最大覆盖次数（回边未配 maxIterations 时用）= 该回边最多被遍历几次。 */
+export const DEFAULT_BACK_EDGE_MAX_ITER = 1;
 
 // ── v1/v2 schema（仅用于读取旧图并归一化为 v3）────────────
 const V1NodeSchema = z.discriminatedUnion('type', [
@@ -212,13 +212,12 @@ export function validateGraph(graph: Graph): void {
 
   const inputIn = graph.edges.filter((e) => e.target === graph.inputNode);
   if (inputIn.length > 0) throw new GraphValidationError(`input node must have in-degree 0, got ${inputIn.length}`);
-  const inputOut = graph.edges.filter((e) => e.source === graph.inputNode);
-  if (inputOut.length > 1) throw new GraphValidationError(`input node must have at most one out-edge, got ${inputOut.length}`);
+  // input 出边数量编辑期不限（可扇出多条前向 → 并行多个首层分支）
 }
 
 /**
  * 可运行性校验（POST /run/start 前）。
- * input 恰好 1 前向出边；所有 agent 从 input 可达；end 可达；单路径（每节点 ≤1 前向 + ≤1 回边出边）。
+ * input ≥1 前向出边（可扇出并行多个首层）；所有 agent 从 input 可达；end 可达；单路径（agent 每节点 ≤1 前向 + ≤1 回边出边）。
  * 环天然有界（回边默认 maxIter + 全局 maxNodeExecutions），不拒环。
  */
 export function validateRunnable(graph: Graph): void {
@@ -226,8 +225,10 @@ export function validateRunnable(graph: Graph): void {
   const isBack = (e: GraphEdge): boolean => backEdges.has(e.id);
 
   const inputOut = graph.edges.filter((e) => e.source === graph.inputNode);
-  if (inputOut.length !== 1) throw new GraphValidationError(`input node must have exactly one out-edge to run, got ${inputOut.length}`);
-  if (isBack(inputOut[0])) throw new GraphValidationError(`input out-edge cannot be a back-edge`);
+  if (inputOut.length < 1) throw new GraphValidationError(`input node must have at least one out-edge to run, got ${inputOut.length}`);
+  for (const e of inputOut) {
+    if (isBack(e)) throw new GraphValidationError(`input out-edge cannot be a back-edge: ${e.id}`);
+  }
 
   // 单路径：每节点 ≤1 前向出边 + ≤1 回边出边
   for (const n of graph.nodes) {
@@ -278,6 +279,8 @@ export function readGraph(): Graph {
     if (err instanceof z.ZodError) throw new GraphValidationError(`schema error: ${err.message}`);
     throw err;
   }
+  // 边 id 归一化为 `source->target`（人类可读 + 稳定；同向重复已被校验拒绝，故唯一）
+  graph = { ...graph, edges: graph.edges.map((e) => ({ ...e, id: `${e.source}->${e.target}` })) };
   validateGraph(graph);
   return graph;
 }
