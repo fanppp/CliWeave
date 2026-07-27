@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "localId": "testing",
   "name": "opencode测试",
   "provider": "opencode",
@@ -8,22 +8,22 @@
     "sandboxMode": "danger-full-access",
     "extraArgs": [],
     "promptVia": "stdin",
-    "cwd": "${PROJECT_ROOT}"
+    "cwd": "${PROJECT_PATH}"
   },
   "model": "alibaba-cn/glm-5.2",
   "storage": {
     "config": {
-      "identityFile": "agents/opencode/testing/config/identity.md",
+      "identityFile": "config/identity.md",
       "rulesFiles": [
-        "agents/opencode/testing/config/rules/*.md"
+        "config/rules/*.md"
       ]
     },
     "runtime": {
-      "activeSessionFile": "agents/opencode/testing/runtime/active-session.json",
+      "activeSessionFile": "runtime/active-session.json",
       "resume": true
     },
     "data": {
-      "cliHome": "agents/opencode/testing/data/cli/.opencode"
+      "cliHome": "data/cli/.opencode"
     }
   }
 }

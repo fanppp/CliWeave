@@ -7,7 +7,6 @@
     "dev": "pnpm -r --parallel run dev",
     "build": "pnpm -r run build",
     "lint": "pnpm -r run lint",
-    "migrate:cli-memory": "pnpm --filter @0agentteams/api run migrate:cli-memory",
     "dev:api": "pnpm --filter @0agentteams/api run dev",
     "dev:web": "pnpm --filter @0agentteams/web run dev"
   },

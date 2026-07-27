@@ -1,21 +1,28 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+/**
+ * agents 路由（legacy 别名 → default 画布实例）。
+ *
+ * M5 后节点只在画布内存在；旧 /api/agents/:nodeKey 全部委托 default 画布实例，
+ * 供前端未迁移组件（NodeConfigPanel/SessionPicker/useNodeHistory）继续工作。
+ * 响应带 Deprecation:true + Sunset，下一版切到 /api/projects/:id/nodes/* 后移除。
+ */
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { FastifyPluginCallback } from 'fastify';
 import {
-  formatNodeKey,
-  listNodeDescriptors,
-  nodeKeyOf,
-  nodeRoot,
-  NodeDescriptorSchema,
-  readNodeDescriptor,
-  type NodeDescriptor,
-  writeNodeDescriptor,
-} from '../agents/NodeDescriptor.js';
-import { clearActiveSession, getActiveSession, setActiveSession } from '../agents/SessionChain.js';
+  DEFAULT_PROJECT_ID,
+  instantiateNodeInstance,
+  listProjectNodeInstances,
+  readProjectNodeInstance,
+  trashNodeInstance,
+} from '../agents/project-storage.js';
+import { formatInstanceKey, parseInstanceKey } from '../agents/instance-key.js';
+import { resolveInstanceDescriptorPaths } from '../agents/node-instance.js';
+import { clearActiveSessionCtx, getActiveSessionCtx, setActiveSessionCtx } from '../agents/SessionChain.js';
+import { listNodeSessionsCtx, readNodeTranscriptCtx } from '../agents/transcript-router.js';
 import { PROVIDERS } from '../agents/register-providers.js';
-import { listNodeSessions, readNodeTranscript } from '../agents/transcript-router.js';
 import { resolveGlob } from '../utils/glob.js';
-import { getProjectRoot } from '../utils/project-root.js';
+import { formatNodeKey, parseNodeKey } from '../agents/NodeDescriptor.js';
+import { readProjectGraph } from '../agents/graph/graph.js';
 
 function readText(path: string): string | undefined {
   try {
@@ -25,51 +32,35 @@ function readText(path: string): string | undefined {
   }
 }
 
-function findDescriptor(nodeKey: string): NodeDescriptor | undefined {
-  try {
-    return readNodeDescriptor(nodeKey);
-  } catch {
-    return undefined;
-  }
-}
-
-function scaffoldNode(descriptor: NodeDescriptor, identity?: string): void {
-  const root = getProjectRoot();
-  const configRoot = join(nodeRoot(descriptor), 'config');
-  mkdirSync(join(configRoot, 'rules'), { recursive: true });
-
-  const identityFull = resolve(root, descriptor.storage.config.identityFile);
-  if (!existsSync(identityFull)) {
-    mkdirSync(dirname(identityFull), { recursive: true });
-    const identityContent =
-      typeof identity === 'string' && identity.trim()
-        ? identity.trim()
-        : `# ${descriptor.name} 节点身份\n\n你是 0AgentTeams 平台中的一个 Agent 节点，由 ${descriptor.provider} CLI 驱动。\n\n## 你的能力\n- 你可以直接读写当前项目的源码文件（工作目录 = 项目根）。\n- 你能编辑 agents/${descriptor.provider}/${descriptor.localId}/config/ 下的 identity.md 与 rules/*.md 改变自己的行为。\n\n## 工作方式\n- 收到需求后先理解意图，再用工具落地。改动小而精准，改完简要说明。\n`;
-    writeFileSync(identityFull, identityContent, 'utf-8');
-  }
-
-  const rulesPath = join(configRoot, 'rules', 'general.md');
-  if (!existsSync(rulesPath)) {
-    writeFileSync(rulesPath, `# ${descriptor.name} 通用规则\n\n## 沟通\n- 用中文回答，除非用户用其它语言提问。\n- 回答简洁直接。\n`, 'utf-8');
-  }
+function deprecate(reply: import('fastify').FastifyReply): void {
+  reply.header('Deprecation', 'true');
+  reply.header('Sunset', 'Wed, 31 Dec 2025 00:00:00 GMT');
+  reply.header('Link', '</api/projects/default/nodes>; rel="successor-version"');
 }
 
 const agentsRoutes: FastifyPluginCallback = (app, _options, done) => {
-  app.get('/api/agents', async () => listNodeDescriptors().map((descriptor) => ({
-    nodeKey: nodeKeyOf(descriptor),
-    localId: descriptor.localId,
-    name: descriptor.name,
-    provider: descriptor.provider,
-    model: descriptor.model,
-  })));
+  // 列 default 画布的节点实例
+  app.get('/api/agents', async (request, reply) => {
+    deprecate(reply);
+    return listProjectNodeInstances(DEFAULT_PROJECT_ID).map((n) => ({
+      nodeKey: n.nodeKey,
+      localId: n.localId,
+      name: n.name,
+      provider: n.provider,
+      ...(n.model ? { model: n.model } : {}),
+    }));
+  });
 
   app.get('/api/agents/providers', async () => PROVIDERS);
 
+  // 在 default 画布内新建实例（legacy 创建别名）
   app.post('/api/providers/:provider/agents', async (request, reply) => {
+    deprecate(reply);
     const { provider } = request.params as { provider: string };
     const body = (request.body ?? {}) as Record<string, unknown>;
     const meta = PROVIDERS.find((item) => item.id === provider);
     if (!meta) return reply.code(400).send({ error: `unknown provider: ${provider}` });
+    if (!meta.installed) return reply.code(409).send({ error: `provider '${provider}' is disabled (not installed)` });
 
     const localId = typeof body.localId === 'string' ? body.localId.trim() : '';
     let nodeKey: string;
@@ -78,184 +69,194 @@ const agentsRoutes: FastifyPluginCallback = (app, _options, done) => {
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : 'invalid localId' });
     }
-
-    if (findDescriptor(nodeKey)) {
+    // 已存在校验
+    try {
+      readProjectNodeInstance(DEFAULT_PROJECT_ID, nodeKey);
       return reply.code(409).send({ error: `node already exists: ${nodeKey}` });
+    } catch {
+      /* 不存在，继续 */
     }
     const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : localId;
-    const duplicateName = listNodeDescriptors().find((descriptor) =>
-      descriptor.provider === provider && descriptor.name.toLocaleLowerCase() === name.toLocaleLowerCase());
-    if (duplicateName) {
-      return reply.code(409).send({ error: `node name already exists in ${provider}: ${name}` });
-    }
-
-    const base = `agents/${provider}/${localId}`;
-    const parsed = NodeDescriptorSchema.safeParse({
-      schemaVersion: 3,
-      localId,
-      name,
-      provider,
-      cli: {
-        command: meta.command,
-        sandboxMode: 'danger-full-access',
-        extraArgs: [],
-        promptVia: 'stdin',
-        cwd: '${PROJECT_ROOT}',
-      },
-      ...(typeof body.model === 'string' && body.model.trim()
-        ? { model: body.model.trim() }
-        : meta.defaultModel ? { model: meta.defaultModel } : {}),
-      storage: {
-        config: {
-          identityFile: `${base}/config/identity.md`,
-          rulesFiles: [`${base}/config/rules/*.md`],
-        },
-        runtime: {
-          activeSessionFile: `${base}/runtime/active-session.json`,
-          resume: true,
-        },
-        data: { cliHome: `${base}/data/cli/${meta.memoryHome}` },
-      },
-    });
-    if (!parsed.success) {
-      return reply.code(400).send({ error: 'invalid descriptor', issues: parsed.error.issues });
-    }
-
-    const identity = typeof body.identity === 'string' ? body.identity : '';
-
     try {
-      writeNodeDescriptor(nodeKey, parsed.data);
-      scaffoldNode(parsed.data, identity);
+      const ctx = instantiateNodeInstance(DEFAULT_PROJECT_ID, nodeKey, {
+        name,
+        command: meta.command,
+        memoryHome: meta.memoryHome,
+        ...(typeof body.model === 'string' && body.model.trim() ? { model: body.model.trim() } : meta.defaultModel ? { model: meta.defaultModel } : {}),
+        ...(typeof body.identity === 'string' ? { identity: body.identity } : {}),
+      });
+      return reply.code(201).send({ status: 'ok', nodeKey, localId: ctx.descriptor.localId, created: true });
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : 'node creation failed' });
     }
-    return reply.code(201).send({ status: 'ok', nodeKey, localId, created: true });
   });
 
-  app.get('/api/agents/:nodeKey', async (request, reply) => {
-    const { nodeKey } = request.params as { nodeKey: string };
-    const descriptor = findDescriptor(nodeKey);
-    if (!descriptor) return reply.code(404).send({ error: `node not found: ${nodeKey}` });
-    const root = getProjectRoot();
-    const identity = readText(resolve(root, descriptor.storage.config.identityFile));
+  app.get<{ Params: { nodeKey: string } }>('/api/agents/:nodeKey', async (request, reply) => {
+    deprecate(reply);
+    const { nodeKey } = request.params;
+    let ctx;
+    try {
+      ctx = readProjectNodeInstance(DEFAULT_PROJECT_ID, nodeKey);
+    } catch (err) {
+      return reply.code(404).send({ error: (err as Error).message });
+    }
+    const resolved = resolveInstanceDescriptorPaths(ctx);
+    const identity = readText(resolved.storage.config.identityFile);
     const rules: { file: string; content: string }[] = [];
-    for (const pattern of descriptor.storage.config.rulesFiles) {
-      for (const file of resolveGlob(pattern, root)) {
+    for (const pattern of resolved.storage.config.rulesFiles) {
+      for (const file of resolveGlob(pattern, ctx.nodeDir)) {
         const content = readText(file);
         if (content !== undefined) rules.push({ file, content });
       }
     }
-    return { nodeKey, descriptor, identity, rules };
+    return { nodeKey, descriptor: ctx.descriptor, identity, rules };
   });
 
-  app.put('/api/agents/:nodeKey', async (request, reply) => {
-    const { nodeKey } = request.params as { nodeKey: string };
-    const descriptor = findDescriptor(nodeKey);
-    if (!descriptor) return reply.code(404).send({ error: `node not found: ${nodeKey}` });
+  app.put<{ Params: { nodeKey: string } }>('/api/agents/:nodeKey', async (request, reply) => {
+    deprecate(reply);
+    const { nodeKey } = request.params;
     const body = (request.body ?? {}) as Record<string, unknown>;
     if ('provider' in body || 'localId' in body || 'schemaVersion' in body || 'storage' in body) {
       return reply.code(400).send({ error: 'provider, localId, schemaVersion, and storage are immutable' });
     }
-
-    const updated = NodeDescriptorSchema.safeParse({
-      ...descriptor,
+    let ctx;
+    try {
+      ctx = readProjectNodeInstance(DEFAULT_PROJECT_ID, nodeKey);
+    } catch (err) {
+      return reply.code(404).send({ error: (err as Error).message });
+    }
+    // 改 name/model → 重写 node.json（V4）
+    const d = ctx.descriptor;
+    const updated = {
+      ...d,
       ...(typeof body.name === 'string' ? { name: body.name } : {}),
       ...(typeof body.model === 'string' ? { model: body.model.trim() || undefined } : {}),
-      ...(typeof body.cli === 'object' && body.cli !== null
-        ? { cli: { ...descriptor.cli, ...(body.cli as Record<string, unknown>) } }
-        : {}),
-    });
-    if (!updated.success) return reply.code(400).send({ error: 'invalid descriptor', issues: updated.error.issues });
-    const duplicateName = listNodeDescriptors().find((item) =>
-      nodeKeyOf(item) !== nodeKey
-      && item.provider === descriptor.provider
-      && item.name.toLocaleLowerCase() === updated.data.name.toLocaleLowerCase());
-    if (duplicateName) return reply.code(409).send({ error: `node name already exists in ${descriptor.provider}: ${updated.data.name}` });
-    writeNodeDescriptor(nodeKey, updated.data);
+    };
+    const file = join(ctx.nodeDir, 'node.json');
+    const tmp = `${file}.tmp`;
+    writeFileSync(tmp, JSON.stringify(updated, null, 2) + '\n', 'utf-8');
+    renameSync(tmp, file);
     return { status: 'ok', nodeKey };
   });
 
-  app.delete('/api/agents/:nodeKey', async (request, reply) => {
-    const { nodeKey } = request.params as { nodeKey: string };
-    const descriptor = findDescriptor(nodeKey);
-    if (!descriptor) return reply.code(404).send({ error: `node not found: ${nodeKey}` });
-    const target = descriptor.migrationPending
-      ? join(getProjectRoot(), 'agents', descriptor.localId)
-      : nodeRoot(descriptor);
-    rmSync(target, { recursive: true, force: true });
-    if (descriptor.migrationPending) rmSync(join(getProjectRoot(), 'agents', `${descriptor.localId}.json`), { force: true });
-    return { status: 'ok', nodeKey };
+  app.delete<{ Params: { nodeKey: string } }>('/api/agents/:nodeKey', async (request, reply) => {
+    deprecate(reply);
+    const { nodeKey } = request.params;
+    // 图引用检查
+    try {
+      const graph = readProjectGraph(DEFAULT_PROJECT_ID);
+      if (graph.nodes.some((n) => n.type === 'agent' && 'agentNodeKey' in n && n.agentNodeKey === nodeKey)) {
+        return reply.code(409).send({ error: 'node is referenced by graph; remove it from graph first' });
+      }
+    } catch {
+      /* 图读失败不阻塞删除 */
+    }
+    try {
+      trashNodeInstance(DEFAULT_PROJECT_ID, nodeKey);
+      return { status: 'ok', nodeKey };
+    } catch (err) {
+      return reply.code(404).send({ error: (err as Error).message });
+    }
   });
 
-  app.get('/api/agents/:nodeKey/history', async (request, reply) => {
-    const { nodeKey } = request.params as { nodeKey: string };
-    const descriptor = findDescriptor(nodeKey);
-    if (!descriptor) return reply.code(404).send({ error: `node not found: ${nodeKey}` });
-    const sessionId = getActiveSession(descriptor);
-    return { history: sessionId ? await readNodeTranscript(descriptor, sessionId) : [], sessionId: sessionId ?? null };
+  app.get<{ Params: { nodeKey: string } }>('/api/agents/:nodeKey/history', async (request, reply) => {
+    deprecate(reply);
+    const { nodeKey } = request.params;
+    try {
+      const ctx = readProjectNodeInstance(DEFAULT_PROJECT_ID, nodeKey);
+      const sessionId = getActiveSessionCtx(ctx);
+      return { history: sessionId ? await readNodeTranscriptCtx(ctx, sessionId) : [], sessionId: sessionId ?? null };
+    } catch (err) {
+      return reply.code(404).send({ error: (err as Error).message });
+    }
   });
 
-  app.get('/api/agents/:nodeKey/sessions', async (request, reply) => {
-    const { nodeKey } = request.params as { nodeKey: string };
-    const descriptor = findDescriptor(nodeKey);
-    if (!descriptor) return reply.code(404).send({ error: `node not found: ${nodeKey}` });
-    return { activeSessionId: getActiveSession(descriptor) ?? null, sessions: await listNodeSessions(descriptor) };
+  app.get<{ Params: { nodeKey: string } }>('/api/agents/:nodeKey/sessions', async (request, reply) => {
+    deprecate(reply);
+    const { nodeKey } = request.params;
+    try {
+      const ctx = readProjectNodeInstance(DEFAULT_PROJECT_ID, nodeKey);
+      return { activeSessionId: getActiveSessionCtx(ctx) ?? null, sessions: await listNodeSessionsCtx(ctx) };
+    } catch (err) {
+      return reply.code(404).send({ error: (err as Error).message });
+    }
   });
 
-  app.post('/api/agents/:nodeKey/sessions/activate', async (request, reply) => {
-    const { nodeKey } = request.params as { nodeKey: string };
+  app.post<{ Params: { nodeKey: string } }>('/api/agents/:nodeKey/sessions/activate', async (request, reply) => {
+    deprecate(reply);
+    const { nodeKey } = request.params;
     const { sessionId } = (request.body ?? {}) as { sessionId?: string };
     if (typeof sessionId !== 'string' || !sessionId.trim()) return reply.code(400).send({ error: 'sessionId required' });
-    const descriptor = findDescriptor(nodeKey);
-    if (!descriptor) return reply.code(404).send({ error: `node not found: ${nodeKey}` });
-    setActiveSession(descriptor, sessionId);
-    return { status: 'ok', activeSessionId: sessionId };
+    try {
+      const ctx = readProjectNodeInstance(DEFAULT_PROJECT_ID, nodeKey);
+      setActiveSessionCtx(ctx, sessionId);
+      return { status: 'ok', activeSessionId: sessionId };
+    } catch (err) {
+      return reply.code(404).send({ error: (err as Error).message });
+    }
   });
 
-  app.post('/api/agents/:nodeKey/sessions/new', async (request, reply) => {
-    const { nodeKey } = request.params as { nodeKey: string };
-    const descriptor = findDescriptor(nodeKey);
-    if (!descriptor) return reply.code(404).send({ error: `node not found: ${nodeKey}` });
-    clearActiveSession(descriptor);
-    return { status: 'ok', activeSessionId: null };
+  app.post<{ Params: { nodeKey: string } }>('/api/agents/:nodeKey/sessions/new', async (request, reply) => {
+    deprecate(reply);
+    const { nodeKey } = request.params;
+    try {
+      const ctx = readProjectNodeInstance(DEFAULT_PROJECT_ID, nodeKey);
+      clearActiveSessionCtx(ctx);
+      return { status: 'ok', activeSessionId: null };
+    } catch (err) {
+      return reply.code(404).send({ error: (err as Error).message });
+    }
   });
 
-  app.put('/api/agents/:nodeKey/identity', async (request, reply) => {
-    const { nodeKey } = request.params as { nodeKey: string };
+  app.put<{ Params: { nodeKey: string } }>('/api/agents/:nodeKey/identity', async (request, reply) => {
+    deprecate(reply);
+    const { nodeKey } = request.params;
     const { content } = (request.body ?? {}) as { content?: string };
     if (typeof content !== 'string') return reply.code(400).send({ error: 'content required' });
-    const descriptor = findDescriptor(nodeKey);
-    if (!descriptor) return reply.code(404).send({ error: `node not found: ${nodeKey}` });
-    const full = resolve(getProjectRoot(), descriptor.storage.config.identityFile);
-    mkdirSync(dirname(full), { recursive: true });
-    writeFileSync(full, content, 'utf-8');
-    return { status: 'ok' };
+    try {
+      const ctx = readProjectNodeInstance(DEFAULT_PROJECT_ID, nodeKey);
+      const resolved = resolveInstanceDescriptorPaths(ctx);
+      const full = resolved.storage.config.identityFile;
+      mkdirSync(dirname(full), { recursive: true });
+      writeFileSync(full, content, 'utf-8');
+      return { status: 'ok' };
+    } catch (err) {
+      return reply.code(404).send({ error: (err as Error).message });
+    }
   });
 
-  app.put('/api/agents/:nodeKey/rules', async (request, reply) => {
-    const { nodeKey } = request.params as { nodeKey: string };
+  app.put<{ Params: { nodeKey: string } }>('/api/agents/:nodeKey/rules', async (request, reply) => {
+    deprecate(reply);
+    const { nodeKey } = request.params;
     const { file, content } = (request.body ?? {}) as { file?: string; content?: string };
     if (typeof file !== 'string' || !file.trim()) return reply.code(400).send({ error: 'file required' });
     if (typeof content !== 'string') return reply.code(400).send({ error: 'content required' });
-    const descriptor = findDescriptor(nodeKey);
-    if (!descriptor) return reply.code(404).send({ error: `node not found: ${nodeKey}` });
-    const root = getProjectRoot();
-    const configRoot = dirname(resolve(root, descriptor.storage.config.identityFile));
+    let ctx;
+    try {
+      ctx = readProjectNodeInstance(DEFAULT_PROJECT_ID, nodeKey);
+    } catch (err) {
+      return reply.code(404).send({ error: (err as Error).message });
+    }
+    const resolved = resolveInstanceDescriptorPaths(ctx);
+    const configRoot = dirname(resolved.storage.config.identityFile);
     const rulesRoot = join(configRoot, 'rules');
-    const target = resolve(root, file);
+    const target = resolve(ctx.nodeDir, file);
     const rel = relative(rulesRoot, target);
     if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
       return reply.code(400).send({ error: 'file must be inside this node\'s config/rules directory' });
     }
-    if (!target.toLowerCase().endsWith('.md')) {
-      return reply.code(400).send({ error: 'only .md files are allowed' });
-    }
+    if (!target.toLowerCase().endsWith('.md')) return reply.code(400).send({ error: 'only .md files are allowed' });
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, content, 'utf-8');
-    return { status: 'ok', file: relative(root, target).replace(/\\/g, '/') };
+    return { status: 'ok', file: relative(ctx.nodeDir, target).replace(/\\/g, '/') };
   });
 
   done();
 };
+
+void parseNodeKey;
+void parseInstanceKey;
+void formatInstanceKey;
+void existsSync;
 
 export default agentsRoutes;

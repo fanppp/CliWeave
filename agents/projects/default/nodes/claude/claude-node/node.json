@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "localId": "claude-node",
   "name": "Claude",
   "provider": "claude",
@@ -8,22 +8,21 @@
     "sandboxMode": "danger-full-access",
     "extraArgs": [],
     "promptVia": "stdin",
-    "cwd": "${PROJECT_ROOT}"
+    "cwd": "${PROJECT_PATH}"
   },
-  "model": "",
   "storage": {
     "config": {
-      "identityFile": "agents/claude/claude-node/config/identity.md",
+      "identityFile": "config/identity.md",
       "rulesFiles": [
-        "agents/claude/claude-node/config/rules/*.md"
+        "config/rules/*.md"
       ]
     },
     "runtime": {
-      "activeSessionFile": "agents/claude/claude-node/runtime/active-session.json",
+      "activeSessionFile": "runtime/active-session.json",
       "resume": true
     },
     "data": {
-      "cliHome": "agents/claude/claude-node/data/cli/.claude"
+      "cliHome": "data/cli/.claude"
     }
   },
   "skills": {

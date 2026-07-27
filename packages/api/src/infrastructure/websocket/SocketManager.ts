@@ -6,6 +6,7 @@
  */
 import type { Server as HttpServer } from 'node:http';
 import { Server as SocketIOServer, type Socket } from 'socket.io';
+import { isInstanceKey } from '../../agents/instance-key.js';
 import type { AgentMessage } from '../../agents/types.js';
 
 /** 图运行向前端广播的 envelope（不与单节点 bare done 混淆）。 */
@@ -28,17 +29,19 @@ export type GraphEvent =
 export class SocketManager {
   private readonly io: SocketIOServer;
 
-  constructor(server: HttpServer, _opts?: { corsOrigin?: string[] }) {
+  constructor(server: HttpServer, opts?: { corsOrigin?: string[] }) {
+    const allowed = opts?.corsOrigin ?? ['http://localhost:3000', 'http://127.0.0.1:3000'];
     this.io = new SocketIOServer(server, {
-      // 本地开发工具：反射任意来源，兼容 credentials
-      cors: { origin: true, credentials: true },
+      // 与 Fastify 共用同一 origin 列表；拒绝任意来源（防 danger-full-access 被 CSRF 利用）
+      cors: { origin: (origin, cb) => { cb(null, !origin || allowed.includes(origin)); }, credentials: true },
     });
     this.io.on('connection', (socket: Socket) => {
       socket.on('join_node', (nodeId: unknown) => {
-        if (typeof nodeId === 'string') socket.join(`node:${nodeId}`);
+        // instanceKey 校验：拒任意字符串入 room
+        if (typeof nodeId === 'string' && isInstanceKey(nodeId)) socket.join(`node:${nodeId}`);
       });
       socket.on('leave_node', (nodeId: unknown) => {
-        if (typeof nodeId === 'string') socket.leave(`node:${nodeId}`);
+        if (typeof nodeId === 'string' && isInstanceKey(nodeId)) socket.leave(`node:${nodeId}`);
       });
       socket.on('join_graph', (runId: unknown, cb?: () => void) => {
         if (typeof runId === 'string') socket.join(`graph:${runId}`);

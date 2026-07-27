@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "localId": "coder",
   "name": "codex编码",
   "provider": "codex",
@@ -8,21 +8,21 @@
     "sandboxMode": "danger-full-access",
     "extraArgs": [],
     "promptVia": "stdin",
-    "cwd": "${PROJECT_ROOT}"
+    "cwd": "${PROJECT_PATH}"
   },
   "storage": {
     "config": {
-      "identityFile": "agents/codex/coder/config/identity.md",
+      "identityFile": "config/identity.md",
       "rulesFiles": [
-        "agents/codex/coder/config/rules/*.md"
+        "config/rules/*.md"
       ]
     },
     "runtime": {
-      "activeSessionFile": "agents/codex/coder/runtime/active-session.json",
+      "activeSessionFile": "runtime/active-session.json",
       "resume": true
     },
     "data": {
-      "cliHome": "agents/codex/coder/data/cli/.codex"
+      "cliHome": "data/cli/.codex"
     }
   }
 }

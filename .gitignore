@@ -29,6 +29,23 @@ agents/graph-runs/
 agents/*/runtime/
 agents/*/data/cli/
 
+# ── M5 画布作用域（projects/<id>/...）──────────────────────────
+# project.local.json 含本机绝对 path，不跟踪。
+agents/projects/*/project.local.json
+# 画布级运行历史。
+agents/projects/*/graph-runs/
+# 画布节点实例的运行态与 CLI 记忆（四层目录：projects/<id>/nodes/<prov>/<localId>/）。
+agents/projects/*/nodes/*/*/runtime/
+agents/projects/*/nodes/*/*/data/cli/
+# M6 frozen 缓存（运行态）。
+agents/projects/*/nodes/*/*/.last-output.json
+# 迁移标记（本机状态，不跟踪）。
+agents/.migrations.local.json
+# 迁移 staging 与 trash（本机临时/可恢复）。
+agents/projects/.staging-*/
+agents/projects/.trash/
+agents/projects/*/.trash/
+
 # Reserved shared storage defaults.
 shared/**/runtime/
 shared/**/data/artifacts/

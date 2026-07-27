@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 3,
+  "inputNode": "__input__",
+  "endNode": "__end__",
+  "maxNodeExecutions": 50,
+  "nodes": [
+    {
+      "id": "__input__",
+      "type": "input",
+      "position": {
+        "x": -355.33163265306115,
+        "y": -43.06122448979589
+      }
+    },
+    {
+      "id": "A",
+      "type": "agent",
+      "agentNodeKey": "codex:coder",
+      "position": {
+        "x": -181.29385705032246,
+        "y": 225.5556519210757
+      }
+    },
+    {
+      "id": "B",
+      "type": "agent",
+      "agentNodeKey": "claude:reviewer",
+      "position": {
+        "x": -163.59442322198257,
+        "y": 357.8950344224065
+      }
+    },
+    {
+      "id": "__end__",
+      "type": "end",
+      "position": {
+        "x": -224.68996285974322,
+        "y": 515.4100655137612
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "__input__->A",
+      "source": "__input__",
+      "target": "A"
+    },
+    {
+      "id": "A->B",
+      "source": "A",
+      "target": "B"
+    },
+    {
+      "id": "B->__end__",
+      "source": "B",
+      "target": "__end__"
+    },
+    {
+      "id": "B->A",
+      "source": "B",
+      "target": "A"
+    }
+  ]
+}

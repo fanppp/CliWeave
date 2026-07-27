@@ -46,14 +46,12 @@ API 启动时按顺序将 v1/v2 扁平节点迁移到 `schemaVersion: 3`：
 - v2 的 `agents/<local-id>.json` 与 `agents/<local-id>/` 整体迁入 `agents/<provider>/<local-id>/node.json`。
 - Windows 因正在运行的 CLI 锁定 home 时，节点以 `migrationPending` 兼容态继续读取旧路径，不返回 404；后续访问自动重试。只有 `EPERM/EBUSY` 可进入该状态，真实目录冲突仍隔离节点。
 
-从用户全局 home 导入历史数据仍使用：
+从用户全局 home 导入历史数据现已由画布作用域迁移接管（M5）：
 
-```powershell
-pnpm migrate:cli-memory
-pnpm migrate:cli-memory -- --apply
-```
-
-导入脚本默认 dry-run，且永不删除全局源数据。
+- 首启时 API 自动检测并执行事务式迁移（`agents/<provider>/<localId>/` → `agents/projects/default/nodes/<provider>/<localId>/`，V3 descriptor→V4 tail）。
+- 迁移 journal：`agents/.migrations.local.json`（本机私有，gitignored），状态机 `detected→staging→committed→verified`。
+- git clone 后 `projects/default` 已存在但无 journal → 视为已迁移（`source:git-bootstrap`），等待绑定 local-path。
+- 旧 `migrate:cli-memory` 脚本已移除（被 project-migration 取代）。
 
 ## 共享数据扩展边界
 

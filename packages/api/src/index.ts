@@ -6,14 +6,16 @@ import cors from '@fastify/cors';
 import Fastify from 'fastify';
 import { registerAllProviders } from './agents/register-providers.js';
 import { migrateAllNodeStorageLayouts } from './agents/NodeDescriptor.js';
+import { migrateProjectScoped } from './agents/project-migration.js';
 import { SocketManager } from './infrastructure/websocket/SocketManager.js';
 import agentsRoutes from './routes/agents.js';
 import graphRoutes from './routes/graph.js';
 import messagesRoutes from './routes/messages.js';
+import projectsRoutes from './routes/projects.js';
 
 const PORT = parseInt(process.env.API_SERVER_PORT ?? '3004', 10);
 const HOST = process.env.API_SERVER_HOST ?? '127.0.0.1';
-const WEB_ORIGINS = (process.env.WEB_ORIGIN ?? 'http://localhost:3000')
+const WEB_ORIGINS = (process.env.WEB_ORIGIN ?? 'http://localhost:3000,http://127.0.0.1:3000')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
@@ -27,16 +29,29 @@ async function main(): Promise<void> {
   // 注册所有 provider（codex / claude / opencode / gemini…）
   registerAllProviders();
 
+  // 画布作用域迁移（事务式、幂等）：verified→跳过；git-bootstrap→标记；needs-migration→迁移。
+  // 不活跃运行/子进程时执行；失败保留 staging + 报告，不阻塞启动。
+  const mig = migrateProjectScoped();
+  if (mig.status === 'migrated' || mig.status === 'git-bootstrap' || mig.status === 'fresh') {
+    console.log(`[migration] ${mig.status}${mig.reason ? `: ${mig.reason}` : ''}${mig.movedNodes ? ` (${mig.movedNodes} nodes)` : ''}`);
+  } else if (mig.status === 'blocked') {
+    console.warn(`[migration] blocked: ${mig.reason ?? 'unknown'}`);
+  }
+
   const app = Fastify({ logger: true });
 
-  // CORS: 本地开发工具，允许所有来源（localhost / 127.0.0.1 / LAN IP 都行）
+  // CORS: 严格使用已声明的 WEB_ORIGINS（loopback 本地工具；开放任意 origin 会与 danger-full-access 叠加成漏洞）
+  const isAllowedOrigin = (origin: string | undefined): boolean => {
+    if (!origin) return true; // 同源/无 Origin（curl、server-to-server）
+    return WEB_ORIGINS.includes(origin);
+  };
   await app.register(cors, {
-    origin: true,
+    origin: (origin, cb) => { cb(null, isAllowedOrigin(origin)); },
     credentials: true,
   });
 
-  // SocketManager（封装 socket.io，提供 broadcast）
-  socketManager = new SocketManager(app.server, { corsOrigin: ['*'] });
+  // SocketManager（封装 socket.io，提供 broadcast；CORS 与 Fastify 共用同一 origin 判断）
+  socketManager = new SocketManager(app.server, { corsOrigin: WEB_ORIGINS });
 
   // 让 Fastify 不要拦截 socket.io 路径，交给 socket.io 自己处理（含 ws 升级）
   app.addHook('onRequest', (request, reply, done) => {
@@ -53,6 +68,7 @@ async function main(): Promise<void> {
   // 路由
   await app.register(messagesRoutes, { socketManager });
   await app.register(graphRoutes, { socketManager });
+  await app.register(projectsRoutes, { socketManager });
   await app.register(agentsRoutes);
 
   try {

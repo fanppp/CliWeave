@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "localId": "youhua",
   "name": "优化",
   "provider": "opencode",
@@ -8,22 +8,22 @@
     "sandboxMode": "danger-full-access",
     "extraArgs": [],
     "promptVia": "stdin",
-    "cwd": "${PROJECT_ROOT}"
+    "cwd": "${PROJECT_PATH}"
   },
   "model": "alibaba-cn/glm-5.2",
   "storage": {
     "config": {
-      "identityFile": "agents/opencode/youhua/config/identity.md",
+      "identityFile": "config/identity.md",
       "rulesFiles": [
-        "agents/opencode/youhua/config/rules/*.md"
+        "config/rules/*.md"
       ]
     },
     "runtime": {
-      "activeSessionFile": "agents/opencode/youhua/runtime/active-session.json",
+      "activeSessionFile": "runtime/active-session.json",
       "resume": true
     },
     "data": {
-      "cliHome": "agents/opencode/youhua/data/cli/.opencode"
+      "cliHome": "data/cli/.opencode"
     }
   }
 }
