@@ -12,6 +12,9 @@ dist/
 agents/*/*/runtime/
 agents/*/*/data/cli/
 
+# Graph run history (per-run jsonl) stays local.
+agents/graph-runs/
+
 # Flat v2 nodes may remain temporarily while a Windows process holds a lock.
 agents/*/runtime/
 agents/*/data/cli/

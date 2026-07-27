@@ -105,6 +105,28 @@
 下一步优先级：① Graph 画布 @xyflow/react ② AgentRouter ③ per-node skills/MCP；Gemini 等本机安装后再按 CLI_STORAGE.md 接入。
 骨架（注册表 + NodeDescriptor 数据驱动）已铺好，全是加法不重写。
 
+## M2 — Graph 画布 + 多节点自由创建 + 执行（2026-07-25 起）
+
+**范围**：单图（一张 graph.json）下的画布编辑 + 持久化 + 运行历史 + 节点创建增强。
+
+| 子任务 | 状态 |
+|--------|------|
+| M2.1 mode 持久化 + join_graph ack 修复（codex 不显示真凶）+ 图模式右侧 + docs | 进行中 |
+| M2.4 graph.ts position + agentNodeKey 唯一校验 + PUT /api/graph 原子写 + readGraph 切 graph.json | 待办 |
+| M2.3 装 @xyflow/react + GraphCanvas + 图模式布局（保 GraphRunPanel 下方） | 待办 |
+| M2.5 routes 层 WriteStream 历史 + run_meta 快照图 + GET runs + RunPicker | 待办 |
+| M2.2 扩展现有 POST /api/providers/:provider/agents 加 identity + AddNodeModal textarea | 待办 |
+| M2.6 typecheck + 联调验收 | 待办 |
+
+**多图目标（前向兼容标注，非当前实现）**：
+- M2 当前为**单图**：`agents/graph.json` 一张，`GET /api/graph` 返回该单图对象（无 graphId 字段）。
+- 未来支持**多图**（每图一套节点 + 拓扑）：升级为 `GET /api/graphs` + `GET /api/graphs/:id`，graph 按文件 `agents/graphs/<id>.json`。
+- **不预存假 graphId**：单图阶段 run 记录不写 graphId（或 null），避免造一个未来要对齐的不稳定标识。多图落地时再定 id 规范。
+
+**M2 限制（已知，留后续）**：
+- 同 agentNodeKey 在一张图内**唯一**（validateGraph 校验）→ 同 agent 多实例隔离（per-graph-node 会话槽）留 M4。
+- opencode 节点入图运行可能卡死（snapshot/watcher 已缓解但未根治），画布加"实验性"警告。
+
 ## 文档更新纪律
 
 每完成一个任务：

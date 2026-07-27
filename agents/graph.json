@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "inputNode": "__input__",
+  "nodes": [
+    {
+      "id": "__input__",
+      "type": "input",
+      "position": {
+        "x": -30.06441825238906,
+        "y": -30.3287294623055
+      }
+    },
+    {
+      "id": "n1",
+      "type": "agent",
+      "agentNodeKey": "codex:codex-node",
+      "position": {
+        "x": 224.0935046535248,
+        "y": -29.56966450884075
+      }
+    },
+    {
+      "id": "n2",
+      "type": "agent",
+      "agentNodeKey": "claude:claude-node",
+      "position": {
+        "x": 482.04675232676243,
+        "y": -29.569664508840763
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source": "__input__",
+      "target": "n1"
+    },
+    {
+      "source": "n1",
+      "target": "n2"
+    }
+  ]
+}

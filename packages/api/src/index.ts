@@ -8,6 +8,7 @@ import { registerAllProviders } from './agents/register-providers.js';
 import { migrateAllNodeStorageLayouts } from './agents/NodeDescriptor.js';
 import { SocketManager } from './infrastructure/websocket/SocketManager.js';
 import agentsRoutes from './routes/agents.js';
+import graphRoutes from './routes/graph.js';
 import messagesRoutes from './routes/messages.js';
 
 const PORT = parseInt(process.env.API_SERVER_PORT ?? '3004', 10);
@@ -51,6 +52,7 @@ async function main(): Promise<void> {
 
   // 路由
   await app.register(messagesRoutes, { socketManager });
+  await app.register(graphRoutes, { socketManager });
   await app.register(agentsRoutes);
 
   try {

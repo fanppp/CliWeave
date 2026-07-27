@@ -18,6 +18,7 @@ export function AddNodeModal({ onClose, onCreated }: { onClose: () => void; onCr
   const [localId, setLocalId] = useState('');
   const [name, setName] = useState('');
   const [model, setModel] = useState('');
+  const [identity, setIdentity] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -39,7 +40,7 @@ export function AddNodeModal({ onClose, onCreated }: { onClose: () => void; onCr
       const res = await fetch(`${API_URL}/api/providers/${encodeURIComponent(provider)}/agents`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ localId: trimmedId, name: name.trim() || trimmedId, model: model.trim() }),
+        body: JSON.stringify({ localId: trimmedId, name: name.trim() || trimmedId, model: model.trim(), identity: identity.trim() }),
       });
       const d = await res.json();
       if (!res.ok) {
@@ -82,6 +83,15 @@ export function AddNodeModal({ onClose, onCreated }: { onClose: () => void; onCr
 
         <label style={styles.label}>model（可空，用 CLI 默认）</label>
         <input style={styles.input} value={model} onChange={(e) => setModel(e.target.value)} placeholder='如：gpt-5 / sonnet / provider/model' />
+
+        <label style={styles.label}>身份 identity（可空，用默认模板）</label>
+        <textarea
+          style={{ ...styles.input, resize: 'vertical', minHeight: 80, fontFamily: 'inherit' }}
+          value={identity}
+          onChange={(e) => setIdentity(e.target.value)}
+          rows={4}
+          placeholder='如：你是一个资深代码审查员，只关注可读性与潜在缺陷…'
+        />
 
         {error && <div style={styles.error}>{error}</div>}
 

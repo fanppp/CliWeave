@@ -59,6 +59,7 @@ interface ChatState {
   isStreaming: boolean;
   activeNodeId: string;
   reloadKey: number;
+  currentInvocationId: string | null;
   setActiveNode: (id: string) => void;
   hydrateActiveNode: () => void;
   addUser: (content: string) => void;
@@ -66,6 +67,7 @@ interface ChatState {
   loadHistory: (entries: HistoryEntry[]) => void;
   triggerReload: () => void;
   setStreaming: (streaming: boolean) => void;
+  setInvocationId: (id: string | null) => void;
   clear: () => void;
 }
 
@@ -87,6 +89,7 @@ export const useChatStore = create<ChatState>((set) => ({
   isStreaming: false,
   activeNodeId: 'codex:codex-node',
   reloadKey: 0,
+  currentInvocationId: null,
   setActiveNode: (id) => {
     persistActiveNode(id);
     set({ activeNodeId: id });
@@ -138,5 +141,6 @@ export const useChatStore = create<ChatState>((set) => ({
     })),
   triggerReload: () => set((s) => ({ reloadKey: s.reloadKey + 1 })),
   setStreaming: (streaming) => set({ isStreaming: streaming }),
-  clear: () => set({ messages: [], isStreaming: false }),
+  setInvocationId: (id) => set({ currentInvocationId: id }),
+  clear: () => set({ messages: [], isStreaming: false, currentInvocationId: null }),
 }));

@@ -5,6 +5,8 @@
  */
 import type { FastifyInstance, FastifyPluginCallback } from 'fastify';
 import { buildAgent, getActiveSession, setActiveSession } from '../agents/AgentServiceFactory.js';
+import { abortRun, registerAbort, unregisterAbort } from '../agents/abort-registry.js';
+import { withNodeLock } from '../agents/node-mutex.js';
 import type { SocketManager } from '../infrastructure/websocket/SocketManager.js';
 
 export interface MessagesRouteOptions {
@@ -30,33 +32,49 @@ const messagesRoutes: FastifyPluginCallback<MessagesRouteOptions> = (app, option
 
     // 后台执行，不阻塞 HTTP 响应
     setImmediate(async () => {
+      const controller = registerAbort(invocationId);
+      let aborted = false;
+      controller.signal.addEventListener('abort', () => {
+        aborted = true;
+      });
       try {
-        const { descriptor, service } = await buildAgent(nodeId);
-        const sessionId = getActiveSession(descriptor);
+        await withNodeLock(nodeId, async () => {
+          const { descriptor, service } = await buildAgent(nodeId);
+          const sessionId = getActiveSession(descriptor);
 
-        // 历史直接来自 codex 自己的 transcript（resume 会话），不另存
-        socketManager.broadcast(
-          {
-            type: 'system_info',
+          // 历史直接来自 codex 自己的 transcript（resume 会话），不另存
+          socketManager.broadcast(
+            {
+              type: 'system_info',
+              nodeId,
+              content: JSON.stringify({ type: 'invoking', invocationId, resume: !!sessionId }),
+              timestamp: Date.now(),
+            },
             nodeId,
-            content: JSON.stringify({ type: 'invoking', invocationId, resume: !!sessionId }),
-            timestamp: Date.now(),
-          },
-          nodeId,
-        );
+          );
 
-        for await (const msg of service.invoke(content, {
-          sessionId,
-          workingDirectory: descriptor.cli.cwd,
-          invocationId,
-        })) {
-          if (msg.type === 'session_init') {
-            setActiveSession(descriptor, msg.sessionId);
-            continue; // session_init 不广播
+          for await (const msg of service.invoke(content, {
+            sessionId,
+            workingDirectory: descriptor.cli.cwd,
+            invocationId,
+            signal: controller.signal,
+          })) {
+            if (msg.type === 'session_init') {
+              setActiveSession(descriptor, msg.sessionId);
+              continue; // session_init 不广播
+            }
+            // 广播到前端（历史由 codex transcript 提供）
+            socketManager.broadcast(msg, nodeId);
           }
-          // 广播到前端（历史由 codex transcript 提供）
-          socketManager.broadcast(msg, nodeId);
-        }
+          // 用户中止：CLI 被 signal 杀掉，流正常结束但不会有 done → 补一个
+          if (aborted) {
+            socketManager.broadcast(
+              { type: 'system_info', nodeId, content: '已中止', timestamp: Date.now() },
+              nodeId,
+            );
+            socketManager.broadcast({ type: 'done', nodeId, timestamp: Date.now() }, nodeId);
+          }
+        });
       } catch (err) {
         console.error('[messages] invoke error for', nodeId, ':', err);
         socketManager.broadcast(
@@ -76,9 +94,21 @@ const messagesRoutes: FastifyPluginCallback<MessagesRouteOptions> = (app, option
           },
           nodeId,
         );
+      } finally {
+        unregisterAbort(invocationId);
       }
     });
   });
+
+  // 中止单节点调用
+  app.post<{ Params: { invocationId: string } }>(
+    '/api/messages/:invocationId/abort',
+    async (request, reply) => {
+      const { invocationId } = request.params;
+      const ok = abortRun(invocationId);
+      return reply.code(ok ? 202 : 404).send({ status: ok ? 'aborted' : 'not_found', invocationId });
+    },
+  );
 
   done();
 };

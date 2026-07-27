@@ -28,6 +28,8 @@ function toTomlString(value: string): string {
 
 const KILL_GRACE_NOTICE = 'CLI 异常退出';
 
+type RunStatus = 'ok' | 'error' | 'resume-failed';
+
 export class CodexAgentService implements AgentService {
   readonly nodeId: NodeId;
   readonly provider = 'codex';
@@ -41,9 +43,36 @@ export class CodexAgentService implements AgentService {
   }
 
   async *invoke(prompt: string, options?: AgentServiceOptions): AsyncIterable<AgentMessage> {
+    const sessionId = options?.sessionId;
+    if (sessionId) {
+      // 先尝试 resume；若陈旧 session 导致快速失败（无实质输出）则回退全新会话
+      const status = yield* this.runOnce(prompt, options, sessionId, true);
+      if (status === 'resume-failed') {
+        yield {
+          type: 'system_info',
+          nodeId: this.nodeId,
+          content: 'resume 失败（会话已陈旧），已回退到全新会话',
+          timestamp: Date.now(),
+        };
+        yield* this.runOnce(prompt, options, undefined, false);
+      }
+      return;
+    }
+    yield* this.runOnce(prompt, options, undefined, false);
+  }
+
+  /**
+   * 单次执行（resume 或 fresh）。
+   * suppressResumeError=true 时，若 resume 快速失败（exit 1 无实质输出），不 yield 错误，返回 'resume-failed' 供上层回退。
+   */
+  private async *runOnce(
+    prompt: string,
+    options: AgentServiceOptions | undefined,
+    sessionId: string | undefined,
+    suppressResumeError: boolean,
+  ): AsyncGenerator<AgentMessage, RunStatus> {
     const model = this.descriptor.model;
     const metadata: MessageMetadata = { provider: 'openai', ...(model ? { model } : {}) };
-    const sessionId = options?.sessionId;
     const cwd = options?.workingDirectory ?? this.descriptor.cli.cwd;
     const sandboxMode = this.descriptor.cli.sandboxMode;
 
@@ -52,10 +81,7 @@ export class CodexAgentService implements AgentService {
     ensureCodexHome(codexHome);
 
     // 公共 config 参数（-c key=value）
-    const configArgs: string[] = [
-      '-c',
-      `approval_policy=${toTomlString('never')}`,
-    ];
+    const configArgs: string[] = ['-c', `approval_policy=${toTomlString('never')}`];
     if (this.compiledL0) {
       configArgs.push('-c', `developer_instructions=${toTomlString(this.compiledL0)}`);
     }
@@ -117,12 +143,16 @@ export class CodexAgentService implements AgentService {
             timestamp: Date.now(),
           };
           yield { type: 'done', nodeId: this.nodeId, metadata, timestamp: Date.now() };
-          return;
+          return 'error';
         }
         if (isCliError(event)) {
           // codex 0.98+ 成功后也 exit 1；有实质输出则抑制
           if (event.exitCode === 1 && event.signal === null && sawSubstantiveOutput) {
             continue;
+          }
+          // resume 快速失败（无实质输出）：陈旧 session，回退全新会话
+          if (suppressResumeError && sessionId && !sawSubstantiveOutput) {
+            return 'resume-failed';
           }
           terminalYielded = true;
           yield {
@@ -133,7 +163,7 @@ export class CodexAgentService implements AgentService {
             timestamp: Date.now(),
           };
           yield { type: 'done', nodeId: this.nodeId, metadata, timestamp: Date.now() };
-          return;
+          return 'error';
         }
 
         // 跟踪实质输出（item.completed 产生 text/tool 结果）
@@ -152,6 +182,7 @@ export class CodexAgentService implements AgentService {
       if (!terminalYielded) {
         yield { type: 'done', nodeId: this.nodeId, metadata, timestamp: Date.now() };
       }
+      return 'ok';
     } catch (err) {
       yield {
         type: 'error',
@@ -161,6 +192,7 @@ export class CodexAgentService implements AgentService {
         timestamp: Date.now(),
       };
       yield { type: 'done', nodeId: this.nodeId, metadata, timestamp: Date.now() };
+      return 'error';
     }
   }
 }

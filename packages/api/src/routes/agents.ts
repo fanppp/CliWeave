@@ -33,7 +33,7 @@ function findDescriptor(nodeKey: string): NodeDescriptor | undefined {
   }
 }
 
-function scaffoldNode(descriptor: NodeDescriptor): void {
+function scaffoldNode(descriptor: NodeDescriptor, identity?: string): void {
   const root = getProjectRoot();
   const configRoot = join(nodeRoot(descriptor), 'config');
   mkdirSync(join(configRoot, 'rules'), { recursive: true });
@@ -41,11 +41,11 @@ function scaffoldNode(descriptor: NodeDescriptor): void {
   const identityFull = resolve(root, descriptor.storage.config.identityFile);
   if (!existsSync(identityFull)) {
     mkdirSync(dirname(identityFull), { recursive: true });
-    writeFileSync(
-      identityFull,
-      `# ${descriptor.name} 节点身份\n\n你是 0AgentTeams 平台中的一个 Agent 节点，由 ${descriptor.provider} CLI 驱动。\n\n## 你的能力\n- 你可以直接读写当前项目的源码文件（工作目录 = 项目根）。\n- 你能编辑 agents/${descriptor.provider}/${descriptor.localId}/config/ 下的 identity.md 与 rules/*.md 改变自己的行为。\n\n## 工作方式\n- 收到需求后先理解意图，再用工具落地。改动小而精准，改完简要说明。\n`,
-      'utf-8',
-    );
+    const identityContent =
+      typeof identity === 'string' && identity.trim()
+        ? identity.trim()
+        : `# ${descriptor.name} 节点身份\n\n你是 0AgentTeams 平台中的一个 Agent 节点，由 ${descriptor.provider} CLI 驱动。\n\n## 你的能力\n- 你可以直接读写当前项目的源码文件（工作目录 = 项目根）。\n- 你能编辑 agents/${descriptor.provider}/${descriptor.localId}/config/ 下的 identity.md 与 rules/*.md 改变自己的行为。\n\n## 工作方式\n- 收到需求后先理解意图，再用工具落地。改动小而精准，改完简要说明。\n`;
+    writeFileSync(identityFull, identityContent, 'utf-8');
   }
 
   const rulesPath = join(configRoot, 'rules', 'general.md');
@@ -121,9 +121,11 @@ const agentsRoutes: FastifyPluginCallback = (app, _options, done) => {
       return reply.code(400).send({ error: 'invalid descriptor', issues: parsed.error.issues });
     }
 
+    const identity = typeof body.identity === 'string' ? body.identity : '';
+
     try {
       writeNodeDescriptor(nodeKey, parsed.data);
-      scaffoldNode(parsed.data);
+      scaffoldNode(parsed.data, identity);
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : 'node creation failed' });
     }
