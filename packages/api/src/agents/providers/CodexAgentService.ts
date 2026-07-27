@@ -16,8 +16,10 @@ import { spawnCli, isCliError, isCliTimeout } from '../../utils/cli-spawn.js';
 import type { CliSpawnOptions } from '../../utils/cli-types.js';
 import type { AgentService, AgentServiceOptions } from '../AgentService.js';
 import type { AgentMessage, MessageMetadata, NodeId } from '../types.js';
-import { nodeKeyOf, type NodeDescriptor } from '../NodeDescriptor.js';
-import { codexEnv, ensureCodexHome, resolveCodexHome } from '../codex-home.js';
+import type { NodeDescriptorV4 } from '../NodeDescriptor.js';
+import type { NodeInstanceContext } from '../node-instance.js';
+import { resolveInstanceDescriptorPaths } from '../node-instance.js';
+import { codexEnv, ensureCodexHome, resolveCodexHomeCtx } from '../codex-home.js';
 import { transformCodexEvent } from './codex-event-transform.js';
 
 /** TOML 字符串转义：-c 的 value 部分按 TOML 解析，需引号+转义 */
@@ -33,13 +35,15 @@ type RunStatus = 'ok' | 'error' | 'resume-failed';
 export class CodexAgentService implements AgentService {
   readonly nodeId: NodeId;
   readonly provider = 'codex';
-  private readonly descriptor: NodeDescriptor;
+  private readonly ctx: NodeInstanceContext;
+  private readonly descriptor: NodeDescriptorV4;
   private readonly compiledL0: string | undefined;
 
-  constructor(descriptor: NodeDescriptor, compiledL0: string | undefined) {
-    this.descriptor = descriptor;
+  constructor(ctx: NodeInstanceContext, compiledL0: string | undefined) {
+    this.ctx = ctx;
+    this.descriptor = resolveInstanceDescriptorPaths(ctx);
     this.compiledL0 = compiledL0;
-    this.nodeId = nodeKeyOf(descriptor);
+    this.nodeId = ctx.nodeKey;
   }
 
   async *invoke(prompt: string, options?: AgentServiceOptions): AsyncIterable<AgentMessage> {
@@ -76,8 +80,8 @@ export class CodexAgentService implements AgentService {
     const cwd = options?.workingDirectory ?? this.descriptor.cli.cwd;
     const sandboxMode = this.descriptor.cli.sandboxMode;
 
-    // per-node 项目内 CODEX_HOME：session/记忆全存本项目，不落全局 ~/.codex
-    const codexHome = resolveCodexHome(this.descriptor);
+    // per-node 项目内 CODEX_HOME（画布实例隔离）：session/记忆全存实例目录
+    const codexHome = resolveCodexHomeCtx(this.ctx);
     ensureCodexHome(codexHome);
 
     // 公共 config 参数（-c key=value）

@@ -6,8 +6,9 @@
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { ensureNodeTemp, nodeTempEnv, resolveNodeCliHome } from './cli-storage.js';
+import { ensureNodeTemp, nodeTempEnv, resolveInstanceCliHome, resolveNodeCliHome } from './cli-storage.js';
 import type { NodeDescriptor } from './NodeDescriptor.js';
+import type { NodeInstanceContext } from './node-instance.js';
 
 /** 全局 claude home（~/.claude 或 $CLAUDE_CONFIG_DIR） */
 export function globalClaudeHome(): string {
@@ -17,6 +18,11 @@ export function globalClaudeHome(): string {
 /** 解析某节点的项目内 claude home（默认 agents/<id>/data/cli/.claude） */
 export function resolveClaudeHome(descriptor: NodeDescriptor): string {
   return resolveNodeCliHome(descriptor, '.claude');
+}
+
+/** 画布实例版：解析 ctx 对应实例的 claude home。 */
+export function resolveClaudeHomeCtx(ctx: NodeInstanceContext): string {
+  return resolveInstanceCliHome(ctx, '.claude');
 }
 
 export function claudeEnv(home: string): Record<string, string> {

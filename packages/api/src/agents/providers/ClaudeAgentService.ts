@@ -11,8 +11,10 @@ import { spawnCli, isCliError, isCliTimeout } from '../../utils/cli-spawn.js';
 import type { CliSpawnOptions } from '../../utils/cli-types.js';
 import type { AgentService, AgentServiceOptions } from '../AgentService.js';
 import type { AgentMessage, MessageMetadata, NodeId } from '../types.js';
-import { nodeKeyOf, type NodeDescriptor } from '../NodeDescriptor.js';
-import { claudeEnv, ensureClaudeHome, resolveClaudeHome } from '../claude-home.js';
+import type { NodeDescriptorV4 } from '../NodeDescriptor.js';
+import type { NodeInstanceContext } from '../node-instance.js';
+import { resolveInstanceDescriptorPaths } from '../node-instance.js';
+import { claudeEnv, ensureClaudeHome, resolveClaudeHomeCtx } from '../claude-home.js';
 import { transformClaudeEvent } from './claude-event-transform.js';
 
 type RunStatus = 'ok' | 'error' | 'resume-failed';
@@ -20,13 +22,15 @@ type RunStatus = 'ok' | 'error' | 'resume-failed';
 export class ClaudeAgentService implements AgentService {
   readonly nodeId: NodeId;
   readonly provider = 'claude';
-  private readonly descriptor: NodeDescriptor;
+  private readonly ctx: NodeInstanceContext;
+  private readonly descriptor: NodeDescriptorV4;
   private readonly compiledL0: string | undefined;
 
-  constructor(descriptor: NodeDescriptor, compiledL0: string | undefined) {
-    this.descriptor = descriptor;
+  constructor(ctx: NodeInstanceContext, compiledL0: string | undefined) {
+    this.ctx = ctx;
+    this.descriptor = resolveInstanceDescriptorPaths(ctx);
     this.compiledL0 = compiledL0;
-    this.nodeId = nodeKeyOf(descriptor);
+    this.nodeId = ctx.nodeKey;
   }
 
   async *invoke(prompt: string, options?: AgentServiceOptions): AsyncIterable<AgentMessage> {
@@ -62,8 +66,8 @@ export class ClaudeAgentService implements AgentService {
     const metadata: MessageMetadata = { provider: 'anthropic', ...(model ? { model } : {}) };
     const cwd = options?.workingDirectory ?? this.descriptor.cli.cwd;
 
-    // per-node 项目内 claude home
-    const claudeHome = resolveClaudeHome(this.descriptor);
+    // per-node 项目内 claude home（画布实例隔离）
+    const claudeHome = resolveClaudeHomeCtx(this.ctx);
     ensureClaudeHome(claudeHome);
 
     const args: string[] = [

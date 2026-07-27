@@ -7,13 +7,14 @@ import { CodexAgentService } from './providers/CodexAgentService.js';
 import { ClaudeAgentService } from './providers/ClaudeAgentService.js';
 import { OpenCodeAgentService } from './providers/OpenCodeAgentService.js';
 import { GeminiAgentService } from './providers/GeminiAgentService.js';
+import type { NodeInstanceContext } from './node-instance.js';
 
 /** 已支持的 provider 元数据（供 web "加节点"时选 CLI） */
 export interface ProviderMeta {
   id: string;
   name: string;
   command: string;
-  /** 默认 CLI home 子目录名（agents/<id>/data/cli/<this>） */
+  /** 默认 CLI home 子目录名（实例 data/cli/<this>） */
   memoryHome: string;
   /** Optional known-good default for providers that cannot reliably auto-select a model. */
   defaultModel?: string;
@@ -34,8 +35,8 @@ export function registerAllProviders(): void {
   if (registered) return;
   registered = true;
 
-  registerProvider('codex', (descriptor, compiledL0) => new CodexAgentService(descriptor, compiledL0));
-  registerProvider('claude', (descriptor, compiledL0) => new ClaudeAgentService(descriptor, compiledL0));
-  registerProvider('opencode', (descriptor, compiledL0) => new OpenCodeAgentService(descriptor, compiledL0));
-  registerProvider('gemini', (descriptor, compiledL0) => new GeminiAgentService(descriptor, compiledL0));
+  registerProvider('codex', (ctx, compiledL0) => new CodexAgentService(ctx, compiledL0));
+  registerProvider('claude', (ctx, compiledL0) => new ClaudeAgentService(ctx, compiledL0));
+  registerProvider('opencode', (ctx, compiledL0) => new OpenCodeAgentService(ctx, compiledL0));
+  registerProvider('gemini', (ctx, compiledL0) => new GeminiAgentService(ctx, compiledL0));
 }

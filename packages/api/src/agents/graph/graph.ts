@@ -11,6 +11,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { getProjectRoot } from '../../utils/project-root.js';
+import { DEFAULT_PROJECT_ID, projectGraphFile } from '../project-storage.js';
 
 const GraphNodeIdSchema = z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_-]*$/, 'invalid graph node id');
 const EdgeIdSchema = z.string().min(1, 'edge id required');
@@ -261,17 +262,19 @@ export function validateRunnable(graph: Graph): void {
   if (graph.endNode && !reachable.has(graph.endNode)) throw new GraphValidationError(`end node '${graph.endNode}' is not reachable from input`);
 }
 
-/** 读取图：agents/graph.json 不存在 → 默认图；存在 → 解析+归一化为 v3 + 校验。 */
-export function readGraph(): Graph {
-  const file = graphFile();
-  if (!existsSync(file)) return getDefaultGraph();
-  let raw: unknown;
-  try {
-    const text = readFileSync(file, 'utf-8').replace(/^\uFEFF/, ''); // 去 UTF-8 BOM
-    raw = JSON.parse(text);
-  } catch (err) {
-    throw new GraphValidationError(`graph.json is not valid JSON: ${(err as Error).message}`);
-  }
+/** 新画布默认图（仅 input 节点，待用户加 agent/end）。 */
+export function getDefaultProjectGraph(): Graph {
+  return {
+    schemaVersion: 3,
+    inputNode: '__input__',
+    maxNodeExecutions: 50,
+    nodes: [{ id: '__input__', type: 'input' }],
+    edges: [],
+  };
+}
+
+/** 解析+归一化+校验一个 graph 原始对象（边 id 归一化为 source->target）。 */
+function parseGraphRaw(raw: unknown): Graph {
   let graph: Graph;
   try {
     graph = parseAndNormalize(raw);
@@ -279,18 +282,56 @@ export function readGraph(): Graph {
     if (err instanceof z.ZodError) throw new GraphValidationError(`schema error: ${err.message}`);
     throw err;
   }
-  // 边 id 归一化为 `source->target`（人类可读 + 稳定；同向重复已被校验拒绝，故唯一）
   graph = { ...graph, edges: graph.edges.map((e) => ({ ...e, id: `${e.source}->${e.target}` })) };
   validateGraph(graph);
   return graph;
 }
 
-/** 原子写入 graph.json（v3）。 */
-export function writeGraph(graph: Graph): void {
+function readGraphFile(file: string, fallbackDefault: Graph | null): Graph {
+  if (!existsSync(file)) {
+    if (fallbackDefault) return fallbackDefault;
+    throw new GraphValidationError(`graph file not found: ${file}`);
+  }
+  const text = readFileSync(file, 'utf-8').replace(/^\uFEFF/, ''); // 去 UTF-8 BOM
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    throw new GraphValidationError(`graph.json is not valid JSON: ${(err as Error).message}`);
+  }
+  return parseGraphRaw(raw);
+}
+
+/** 读取画布图（强制 projectId）。文件缺失 → 返回新画布默认图（仅 input）。 */
+export function readProjectGraph(projectId: string): Graph {
+  return readGraphFile(projectGraphFile(projectId), getDefaultProjectGraph());
+}
+
+/** 原子写入画布图（强制 projectId）。 */
+export function writeProjectGraph(projectId: string, graph: Graph): void {
   const parsed = GraphV3Schema.parse(graph);
   validateGraph(parsed);
-  const file = graphFile();
+  const file = projectGraphFile(projectId);
   const tmp = `${file}.tmp`;
   writeFileSync(tmp, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
   renameSync(tmp, file);
+}
+
+/**
+ * 运行态校验（含需要 projectId 上下文的检查，如 M6 frozen 缓存）。
+ * M5：仅做结构 validateRunnable；M6 在此加 frozen 节点缓存检查。
+ */
+export function validateProjectRun(projectId: string, graph: Graph): void {
+  validateRunnable(graph);
+  // M6: frozen 节点 .last-output.json 缓存检查（决策节点须含 verdict）
+}
+
+// ── legacy wrappers（default 项目别名，供 /api/graph* 过渡）────────────
+/** @deprecated 用 readProjectGraph(DEFAULT_PROJECT_ID) */
+export function readGraph(): Graph {
+  return readProjectGraph(DEFAULT_PROJECT_ID);
+}
+/** @deprecated 用 writeProjectGraph(DEFAULT_PROJECT_ID, graph) */
+export function writeGraph(graph: Graph): void {
+  writeProjectGraph(DEFAULT_PROJECT_ID, graph);
 }

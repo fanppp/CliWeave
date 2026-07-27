@@ -9,19 +9,23 @@ import { spawnCli, isCliError, isCliTimeout } from '../../utils/cli-spawn.js';
 import type { CliSpawnOptions } from '../../utils/cli-types.js';
 import type { AgentService, AgentServiceOptions } from '../AgentService.js';
 import type { AgentMessage, MessageMetadata, NodeId } from '../types.js';
-import { nodeKeyOf, type NodeDescriptor } from '../NodeDescriptor.js';
+import type { NodeDescriptorV4 } from '../NodeDescriptor.js';
+import type { NodeInstanceContext } from '../node-instance.js';
+import { resolveInstanceDescriptorPaths } from '../node-instance.js';
 import { transformGeminiEvent } from './gemini-event-transform.js';
 
 export class GeminiAgentService implements AgentService {
   readonly nodeId: NodeId;
   readonly provider = 'gemini';
-  private readonly descriptor: NodeDescriptor;
+  private readonly ctx: NodeInstanceContext;
+  private readonly descriptor: NodeDescriptorV4;
   private readonly compiledL0: string | undefined;
 
-  constructor(descriptor: NodeDescriptor, compiledL0: string | undefined) {
-    this.descriptor = descriptor;
+  constructor(ctx: NodeInstanceContext, compiledL0: string | undefined) {
+    this.ctx = ctx;
+    this.descriptor = resolveInstanceDescriptorPaths(ctx);
     this.compiledL0 = compiledL0;
-    this.nodeId = nodeKeyOf(descriptor);
+    this.nodeId = ctx.nodeKey;
   }
 
   async *invoke(prompt: string, options?: AgentServiceOptions): AsyncIterable<AgentMessage> {

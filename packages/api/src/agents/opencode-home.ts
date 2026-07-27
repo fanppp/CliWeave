@@ -10,9 +10,11 @@ import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, extname, join, resolve } from 'node:path';
 import { getProjectRoot } from '../utils/project-root.js';
-import { ensureNodeTemp, nodeTempEnv, resolveNodeCliHome } from './cli-storage.js';
+import { ensureNodeTemp, nodeTempEnv, resolveInstanceCliHome, resolveNodeCliHome } from './cli-storage.js';
 import type { NodeDescriptor } from './NodeDescriptor.js';
 import { resolveDescriptorPaths } from './NodeDescriptor.js';
+import type { NodeInstanceContext } from './node-instance.js';
+import { resolveInstanceDescriptorPaths } from './node-instance.js';
 /** 全局 opencode data 目录（~/.local/share/opencode） */
 export function globalOpencodeDataDir(): string {
   return join(homedir(), '.local', 'share', 'opencode');
@@ -21,6 +23,11 @@ export function globalOpencodeDataDir(): string {
 /** 解析某节点项目内 opencode base 目录（默认 agents/<id>/data/cli/.opencode） */
 export function resolveOpencodeHome(descriptor: NodeDescriptor): string {
   return resolveNodeCliHome(descriptor, '.opencode');
+}
+
+/** 画布实例版：解析 ctx 对应实例的 opencode base 目录。 */
+export function resolveOpencodeHomeCtx(ctx: NodeInstanceContext): string {
+  return resolveInstanceCliHome(ctx, '.opencode');
 }
 
 /** 构造给 opencode 子进程的 env（XDG 指向项目内 + OPENCODE_CONFIG 指向 per-node 配置） */
@@ -92,6 +99,35 @@ export function writeOpencodeConfig(descriptor: NodeDescriptor, home: string): s
     cfg.small_model = descriptor.model;
   }
   // Snapshotting the workspace recursively scans per-node CLI homes and can deadlock its internal git repo.
+  cfg.snapshot = false;
+  cfg.watcher = { ignore: ['agents/*/data/cli/**', 'agents/*/runtime/**', 'shared/**/runtime/**'] };
+  cfg.permission = { edit: 'allow', bash: 'allow', write: 'allow' };
+  const content = JSON.stringify(cfg, null, 2);
+  try {
+    if (readFileSync(configPath, 'utf-8') === content) return configPath;
+  } catch {
+    // Missing/unreadable config is rewritten below.
+  }
+  writeFileSync(configPath, content, 'utf-8');
+  return configPath;
+}
+
+/** 画布实例版：写 per-node opencode.json（instructions 用 ctx 解析后的绝对路径）。 */
+export function writeOpencodeConfigCtx(ctx: NodeInstanceContext, home: string): string {
+  const configDir = join(home, 'config', 'opencode');
+  mkdirSync(configDir, { recursive: true });
+  const configPath = join(configDir, 'opencode.json');
+  const resolved = resolveInstanceDescriptorPaths(ctx);
+  const toAbs = (p: string): string => p.replace(/\\/g, '/');
+  const instructions: string[] = [];
+  if (resolved.storage.config.identityFile) instructions.push(toAbs(resolved.storage.config.identityFile));
+  for (const pattern of resolved.storage.config.rulesFiles) instructions.push(toAbs(pattern));
+  const cfg: Record<string, unknown> = { $schema: 'https://opencode.ai/config.json' };
+  if (instructions.length > 0) cfg.instructions = instructions;
+  if (ctx.descriptor.model) {
+    cfg.model = ctx.descriptor.model;
+    cfg.small_model = ctx.descriptor.model;
+  }
   cfg.snapshot = false;
   cfg.watcher = { ignore: ['agents/*/data/cli/**', 'agents/*/runtime/**', 'shared/**/runtime/**'] };
   cfg.permission = { edit: 'allow', bash: 'allow', write: 'allow' };

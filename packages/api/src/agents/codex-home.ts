@@ -6,8 +6,9 @@
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { ensureNodeTemp, nodeTempEnv, resolveNodeCliHome } from './cli-storage.js';
+import { ensureNodeTemp, nodeTempEnv, resolveInstanceCliHome, resolveNodeCliHome } from './cli-storage.js';
 import type { NodeDescriptor } from './NodeDescriptor.js';
+import type { NodeInstanceContext } from './node-instance.js';
 
 /** 全局 codex home（~/.codex 或 $CODEX_HOME） */
 export function globalCodexHome(): string {
@@ -17,6 +18,11 @@ export function globalCodexHome(): string {
 /** 解析某节点的项目内 CODEX_HOME（默认 agents/<id>/data/cli/.codex） */
 export function resolveCodexHome(descriptor: NodeDescriptor): string {
   return resolveNodeCliHome(descriptor, '.codex');
+}
+
+/** 画布实例版：解析 ctx 对应实例的 CODEX_HOME。 */
+export function resolveCodexHomeCtx(ctx: NodeInstanceContext): string {
+  return resolveInstanceCliHome(ctx, '.codex');
 }
 
 export function codexEnv(codexHome: string): Record<string, string> {

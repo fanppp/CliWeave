@@ -9,10 +9,10 @@
  */
 import type { FastifyInstance, FastifyPluginCallback } from 'fastify';
 import { executeGraph } from '../agents/graph/AgentRouter.js';
-import { GraphV3Schema, GraphValidationError, readGraph, validateGraph, validateRunnable, writeGraph } from '../agents/graph/graph.js';
+import { GraphV3Schema, GraphValidationError, readProjectGraph, validateGraph, validateProjectRun, writeProjectGraph } from '../agents/graph/graph.js';
 import type { Graph } from '../agents/graph/graph.js';
 import { closeRunStream, listRuns, readRun, recordRunEvent, recordRunStart } from '../agents/graph/graph-run-store.js';
-import { readNodeDescriptor } from '../agents/NodeDescriptor.js';
+import { DEFAULT_PROJECT_ID, readProjectNodeInstance } from '../agents/project-storage.js';
 import { abortRun, registerAbort, unregisterAbort } from '../agents/abort-registry.js';
 import type { SocketManager } from '../infrastructure/websocket/SocketManager.js';
 
@@ -33,7 +33,7 @@ const graphRoutes: FastifyPluginCallback<GraphRouteOptions> = (app, options, don
 
   app.get('/api/graph', async (_request, reply) => {
     try {
-      const graph = readGraph();
+      const graph = readProjectGraph(DEFAULT_PROJECT_ID);
       return reply.send(graph);
     } catch (err) {
       if (err instanceof GraphValidationError || err instanceof Error) {
@@ -54,12 +54,12 @@ const graphRoutes: FastifyPluginCallback<GraphRouteOptions> = (app, options, don
       const msg = err instanceof Error ? err.message : 'invalid graph';
       return reply.code(400).send({ error: msg });
     }
-    // agentNodeKey 存在校验（审核#14：逐个 try/catch 聚合缺失节点一次返回）
+    // agentNodeKey 存在校验（画布实例存在）
     const missing: string[] = [];
     for (const node of graph.nodes) {
       if (node.type !== 'agent') continue;
       try {
-        readNodeDescriptor(node.agentNodeKey);
+        readProjectNodeInstance(DEFAULT_PROJECT_ID, node.agentNodeKey);
       } catch {
         missing.push(node.agentNodeKey);
       }
@@ -68,7 +68,7 @@ const graphRoutes: FastifyPluginCallback<GraphRouteOptions> = (app, options, don
       return reply.code(400).send({ error: `agent nodes not found: ${missing.join(', ')}` });
     }
     try {
-      writeGraph(graph);
+      writeProjectGraph(DEFAULT_PROJECT_ID, graph);
       return reply.code(200).send({ status: 'ok' });
     } catch (err) {
       return reply.code(500).send({ error: `write graph failed: ${(err as Error).message}` });
@@ -99,8 +99,8 @@ const graphRoutes: FastifyPluginCallback<GraphRouteOptions> = (app, options, don
 
       let graph;
       try {
-        graph = readGraph();
-        validateRunnable(graph); // 运行前严格校验（入度≤1/无环/可达）；编辑态可不满足
+        graph = readProjectGraph(DEFAULT_PROJECT_ID);
+        validateProjectRun(DEFAULT_PROJECT_ID, graph); // 运行态校验（结构 + M6 frozen 缓存）
       } catch (err) {
         pendingRuns.delete(runId);
         const msg = err instanceof Error ? err.message : 'graph not runnable';
@@ -113,7 +113,7 @@ const graphRoutes: FastifyPluginCallback<GraphRouteOptions> = (app, options, don
       pendingRuns.delete(runId);
 
       const controller = registerAbort(runId);
-      recordRunStart(runId, prompt, graph);
+      recordRunStart(DEFAULT_PROJECT_ID, runId, prompt, graph);
 
       // 先回 202，流式回复走 WebSocket
       reply.code(202).send({ status: 'started', runId });
@@ -121,9 +121,12 @@ const graphRoutes: FastifyPluginCallback<GraphRouteOptions> = (app, options, don
       setImmediate(() => {
         executeGraph(prompt, graph, {
           runId,
+          projectId: DEFAULT_PROJECT_ID,
           emit: (event) => {
             socketManager.broadcastGraph(event);
-            recordRunEvent(runId, event); // 异步 WriteStream 落盘（审核#3）
+          },
+          record: (event) => {
+            recordRunEvent(DEFAULT_PROJECT_ID, runId, event); // 异步 WriteStream 落盘；recordRunEvent 防御性净化 token（M8）
           },
           signal: controller.signal,
         })
@@ -136,16 +139,16 @@ const graphRoutes: FastifyPluginCallback<GraphRouteOptions> = (app, options, don
           })
           .finally(() => {
             unregisterAbort(runId);
-            closeRunStream(runId);
+            closeRunStream(DEFAULT_PROJECT_ID, runId);
           });
       });
     },
   );
 
-  // 图运行历史：列表 + 重放
+  // 图运行历史：列表 + 重放（default 项目别名）
   app.get('/api/graph/runs', async (_request, reply) => {
     try {
-      return reply.send({ runs: listRuns() });
+      return reply.send({ runs: listRuns(DEFAULT_PROJECT_ID) });
     } catch {
       return reply.code(500).send({ error: 'failed to list runs' });
     }
@@ -153,7 +156,7 @@ const graphRoutes: FastifyPluginCallback<GraphRouteOptions> = (app, options, don
 
   app.get<{ Params: { runId: string } }>('/api/graph/runs/:runId', async (request, reply) => {
     const { runId } = request.params;
-    const data = readRun(runId);
+    const data = readRun(DEFAULT_PROJECT_ID, runId);
     if (!data.meta) return reply.code(404).send({ error: 'run not found' });
     return reply.send(data);
   });

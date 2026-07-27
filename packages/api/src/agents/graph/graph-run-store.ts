@@ -1,36 +1,37 @@
 /**
- * 图运行历史持久化（per-run jsonl，仿 transcript 模式）
+ * 图运行历史持久化（per-project per-run jsonl）
  *
- * - agents/graph-runs/<runId>.jsonl：首行 run_meta（快照图结构 + prompt + createdAt），其后每行一个 GraphEvent envelope。
- * - 用 fs.WriteStream（异步缓冲），不用 appendFileSync（审核#3：避免阻塞事件循环）。
- * - run_meta 快照 nodes[{id,type,agentNodeKey?}]，重放时按快照配节点 label，改图后不失真（审核#4）。
- * - 单图阶段不写 graphId（审核#15：避免造未来要对齐的假 id）；多图落地时再定。
+ * - agents/projects/<projectId>/graph-runs/<runId>.jsonl：首行 run_meta（projectId + prompt + createdAt + graph + graphNodeInstances），其后每行一个 GraphEvent envelope。
+ * - 用 fs.WriteStream（异步缓冲）。
+ * - recordRunEvent 防御性净化：若事件含原始 resumeToken → 抛错（M8 run_paused 须发 hash 形到 record）。
  */
 import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, type WriteStream } from 'node:fs';
 import { join } from 'node:path';
 import { getProjectRoot } from '../../utils/project-root.js';
+import { formatInstanceKey } from '../instance-key.js';
+import { projectRunsDir } from '../project-storage.js';
 import type { GraphEvent } from '../../infrastructure/websocket/SocketManager.js';
-import type { Graph } from './graph.js';
+import type { Graph, GraphNode } from './graph.js';
 
-function runsDir(): string {
-  return join(getProjectRoot(), 'agents', 'graph-runs');
-}
-
-function runFile(runId: string): string {
-  return join(runsDir(), `${runId}.jsonl`);
+function runFile(projectId: string, runId: string): string {
+  return join(projectRunsDir(projectId), `${runId}.jsonl`);
 }
 
 export interface RunMeta {
   type: 'run_meta';
   runId: string;
+  projectId: string;
   prompt: string;
   createdAt: number;
   /** 完整 graph 快照（含 end/role/when/maxIterations/edge.id），重放时按快照配节点 label/配色/迭代。 */
   graph: Graph;
+  /** 仅 agent 图节点 → instanceKey（input/end 无 instanceKey，故 Partial）。重放/审计用。 */
+  graphNodeInstances: Partial<Record<string, string>>;
 }
 
 export interface RunSummary {
   runId: string;
+  projectId: string;
   prompt: string;
   createdAt: number;
   status: 'done' | 'error' | 'aborted' | 'unknown';
@@ -38,38 +39,52 @@ export interface RunSummary {
 
 const openStreams = new Map<string, WriteStream>();
 
-function getStream(runId: string): WriteStream {
-  const existing = openStreams.get(runId);
+function streamKey(projectId: string, runId: string): string {
+  return `${projectId}/${runId}`;
+}
+
+function getStream(projectId: string, runId: string): WriteStream {
+  const key = streamKey(projectId, runId);
+  const existing = openStreams.get(key);
   if (existing && !existing.destroyed) return existing;
-  mkdirSync(runsDir(), { recursive: true });
-  const stream = createWriteStream(runFile(runId), { flags: 'a' });
-  openStreams.set(runId, stream);
+  mkdirSync(projectRunsDir(projectId), { recursive: true });
+  const stream = createWriteStream(runFile(projectId, runId), { flags: 'a' });
+  openStreams.set(key, stream);
   return stream;
 }
 
-/** 运行开始：写 run_meta 首行（完整 graph 快照）。 */
-export function recordRunStart(runId: string, prompt: string, graph: Graph): void {
+/** 运行开始：写 run_meta 首行（完整 graph 快照 + graphNodeInstances）。 */
+export function recordRunStart(projectId: string, runId: string, prompt: string, graph: Graph): void {
   const meta: RunMeta = {
     type: 'run_meta',
     runId,
+    projectId,
     prompt,
     createdAt: Date.now(),
     graph,
+    graphNodeInstances: Object.fromEntries(
+      graph.nodes
+        .filter((n): n is Extract<GraphNode, { type: 'agent' }> => n.type === 'agent' && 'agentNodeKey' in n && !!n.agentNodeKey)
+        .map((n) => [n.id, formatInstanceKey(projectId, n.agentNodeKey)] as const),
+    ),
   };
-  getStream(runId).write(JSON.stringify(meta) + '\n');
+  getStream(projectId, runId).write(JSON.stringify(meta) + '\n');
 }
 
-/** 追加一个 envelope 事件。 */
-export function recordRunEvent(runId: string, event: GraphEvent): void {
-  getStream(runId).write(JSON.stringify(event) + '\n');
+/** 追加一个 envelope 事件。防御性净化：原始 resumeToken 不得进 JSONL（M8 须发 hash 形）。 */
+export function recordRunEvent(projectId: string, runId: string, event: GraphEvent): void {
+  if ('resumeToken' in event && typeof (event as { resumeToken?: unknown }).resumeToken === 'string') {
+    throw new Error(`recordRunEvent: raw resumeToken must not be persisted (use resumeTokenHash); event type=${event.type}`);
+  }
+  getStream(projectId, runId).write(JSON.stringify(event) + '\n');
 }
 
 /** 运行结束：关闭流，释放 fd。 */
-export function closeRunStream(runId: string): void {
-  const stream = openStreams.get(runId);
+export function closeRunStream(projectId: string, runId: string): void {
+  const stream = openStreams.get(streamKey(projectId, runId));
   if (stream) {
     stream.end();
-    openStreams.delete(runId);
+    openStreams.delete(streamKey(projectId, runId));
   }
 }
 
@@ -92,7 +107,7 @@ function readJsonl(file: string): { meta?: RunMeta; events: GraphEvent[] } {
     try {
       obj = JSON.parse(trimmed);
     } catch {
-      continue;
+      continue; // 末行不完整容忍
     }
     if (isRunMeta(obj)) meta = obj;
     else if (isGraphEvent(obj)) events.push(obj);
@@ -101,13 +116,13 @@ function readJsonl(file: string): { meta?: RunMeta; events: GraphEvent[] } {
 }
 
 /** 重放某次 run：返回 meta + 事件序列。 */
-export function readRun(runId: string): { meta?: RunMeta; events: GraphEvent[] } {
-  return readJsonl(runFile(runId));
+export function readRun(projectId: string, runId: string): { meta?: RunMeta; events: GraphEvent[] } {
+  return readJsonl(runFile(projectId, runId));
 }
 
-/** 列出最近 N 次 run（按 createdAt 降序）。status 从末尾事件推断。 */
-export function listRuns(limit = 20): RunSummary[] {
-  const dir = runsDir();
+/** 列出某画布最近 N 次 run（按 createdAt 降序）。status 从末尾事件推断。 */
+export function listRuns(projectId: string, limit = 20): RunSummary[] {
+  const dir = projectRunsDir(projectId);
   if (!existsSync(dir)) return [];
   const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
   const summaries: RunSummary[] = [];
@@ -122,8 +137,14 @@ export function listRuns(limit = 20): RunSummary[] {
       else if (last.type === 'run_error') status = 'error';
       else if (last.type === 'run_aborted') status = 'aborted';
     }
-    summaries.push({ runId: meta.runId, prompt: meta.prompt, createdAt: meta.createdAt, status });
+    summaries.push({ runId: meta.runId, projectId: meta.projectId, prompt: meta.prompt, createdAt: meta.createdAt, status });
   }
   summaries.sort((a, b) => b.createdAt - a.createdAt);
   return summaries.slice(0, limit);
 }
+
+// 兼容：导出 runsDir 根（迁移/调试用）。
+export function _runsDir(projectId: string): string {
+  return projectRunsDir(projectId);
+}
+void getProjectRoot;

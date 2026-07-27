@@ -10,7 +10,9 @@
  * - 回边覆盖次数达 maxIterations（默认1）→ run_done(edge_limit, 最后生产者产出)；无生产者输出 → run_error。
  * - 决策点未取到 verdict → 当不满意（走回边，靠 maxIter 兜底）。
  */
-import { buildAgent, getActiveSession, setActiveSession } from '../AgentServiceFactory.js';
+import { buildAgent, getActiveSessionCtx, setActiveSessionCtx } from '../AgentServiceFactory.js';
+import { formatInstanceKey } from '../instance-key.js';
+import { formatSubInvocationId } from '../run-registry.js';
 import { withNodeLock } from '../node-mutex.js';
 import { computeBackEdges, DEFAULT_BACK_EDGE_MAX_ITER, type Graph, type GraphAgentNode, type GraphEdge } from './graph.js';
 import { extractVerdict, type TrailEntry, type Verdict, type VerdictContext } from './verdict.js';
@@ -19,7 +21,11 @@ import type { GraphEvent } from '../../infrastructure/websocket/SocketManager.js
 
 export interface ExecuteOptions {
   runId: string;
+  projectId: string;
+  /** WS 广播（公开形，M8 run_paused 可携带原始 resumeToken）。 */
   emit: (event: GraphEvent) => void;
+  /** JSONL 持久化（持久形，token 须由调用方/recordRunEvent 净化为 hash）。 */
+  record?: (event: GraphEvent) => void;
   signal?: AbortSignal;
 }
 
@@ -29,57 +35,63 @@ interface NodeOutcome {
   error?: string;
 }
 
-export type ExecNode = (node: GraphAgentNode, prompt: string, opts: ExecuteOptions) => Promise<NodeOutcome>;
+export type ExecNode = (node: GraphAgentNode, prompt: string, opts: ExecuteOptions, iteration?: number) => Promise<NodeOutcome>;
 
 function ts(): number {
   return Date.now();
 }
 
-/** 真实执行单个 agent 节点。 */
-export async function runAgentNode(node: GraphAgentNode, nodePrompt: string, opts: ExecuteOptions): Promise<NodeOutcome> {
-  const { runId, emit, signal } = opts;
+/** 真实执行单个 agent 节点（画布实例隔离）。 */
+export async function runAgentNode(node: GraphAgentNode, nodePrompt: string, opts: ExecuteOptions, iteration: number = 0): Promise<NodeOutcome> {
+  const { runId, projectId, emit, record, signal } = opts;
+  const instanceKey = formatInstanceKey(projectId, node.agentNodeKey);
+  const emitBoth = (e: GraphEvent): void => {
+    emit(e);
+    record?.(e);
+  };
   try {
-    return await withNodeLock(node.agentNodeKey, async () => {
+    return await withNodeLock(instanceKey, async () => {
       if (signal?.aborted) return { status: 'aborted' } satisfies NodeOutcome;
-      emit({ type: 'node_started', runId, nodeId: node.id });
-      const { descriptor, service } = await buildAgent(node.agentNodeKey);
-      const sessionId = getActiveSession(descriptor);
+      emitBoth({ type: 'node_started', runId, nodeId: node.id, instanceKey });
+      const { ctx, service } = await buildAgent(projectId, node.agentNodeKey);
+      const sessionId = getActiveSessionCtx(ctx);
       const texts: string[] = [];
+      const subInvocationId = formatSubInvocationId(runId, node.id, iteration);
 
       for await (const msg of service.invoke(nodePrompt, {
         sessionId,
-        workingDirectory: descriptor.cli.cwd,
-        invocationId: runId,
+        workingDirectory: ctx.projectPath,
+        invocationId: subInvocationId,
         ...(signal ? { signal } : {}),
       })) {
         if (msg.type === 'session_init') {
-          setActiveSession(descriptor, msg.sessionId);
+          setActiveSessionCtx(ctx, msg.sessionId);
           continue;
         }
         if (msg.type === 'done') continue;
         if (msg.type === 'error') {
-          emit({ type: 'node_message', runId, nodeId: node.id, message: msg });
-          emit({ type: 'node_error', runId, nodeId: node.id, error: msg.error });
+          emitBoth({ type: 'node_message', runId, nodeId: node.id, instanceKey, message: msg });
+          emitBoth({ type: 'node_error', runId, nodeId: node.id, instanceKey, error: msg.error });
           return { status: 'error', error: msg.error } satisfies NodeOutcome;
         }
         if (msg.type === 'text' && !msg.content.startsWith('[notice]')) texts.push(msg.content);
-        emit({ type: 'node_message', runId, nodeId: node.id, message: msg });
+        emitBoth({ type: 'node_message', runId, nodeId: node.id, instanceKey, message: msg });
       }
       if (signal?.aborted) return { status: 'aborted' } satisfies NodeOutcome;
 
       const finalText = texts.at(-1) ?? '';
       if (!finalText) {
         const error = `node '${node.id}' produced no valid text output`;
-        emit({ type: 'node_error', runId, nodeId: node.id, error });
+        emitBoth({ type: 'node_error', runId, nodeId: node.id, instanceKey, error });
         return { status: 'error', error } satisfies NodeOutcome;
       }
-      emit({ type: 'node_done', runId, nodeId: node.id });
+      emitBoth({ type: 'node_done', runId, nodeId: node.id, instanceKey });
       return { status: 'ok', finalText } satisfies NodeOutcome;
     });
   } catch (err) {
     if (signal?.aborted) return { status: 'aborted' };
     const error = (err as Error).message;
-    emit({ type: 'node_error', runId, nodeId: node.id, error });
+    emitBoth({ type: 'node_error', runId, nodeId: node.id, instanceKey, error });
     return { status: 'error', error };
   }
 }
@@ -100,7 +112,7 @@ function buildPrompt(node: GraphAgentNode, trail: TrailEntry[], input: string, i
 
 /** 单路径条件游走（可注入 exec 用于测试）。input 可扇出多条前向出边 → 并行跑多个首层分支，各自产出后图结束（无汇合）。 */
 export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptions, exec: ExecNode = runAgentNode): Promise<void> {
-  const { runId, emit, signal } = opts;
+  const { runId, projectId, emit, record, signal } = opts;
   const inputNode = graph.nodes.find((n) => n.id === graph.inputNode);
   if (!inputNode || inputNode.type !== 'input') {
     emit({ type: 'run_error', runId, error: 'invalid graph: input node missing' });
@@ -116,12 +128,17 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
     if (finished) return;
     finished = true;
     emit(ev);
+    record?.(ev);
   };
 
   // input 伪节点
-  emit({ type: 'node_started', runId, nodeId: inputNode.id });
-  emit({ type: 'node_message', runId, nodeId: inputNode.id, message: { type: 'text', nodeId: inputNode.id, content: prompt, timestamp: ts() } as AgentMessage });
-  emit({ type: 'node_done', runId, nodeId: inputNode.id });
+  const emitInput = (ev: GraphEvent): void => {
+    emit(ev);
+    record?.(ev);
+  };
+  emitInput({ type: 'node_started', runId, nodeId: inputNode.id });
+  emitInput({ type: 'node_message', runId, nodeId: inputNode.id, message: { type: 'text', nodeId: inputNode.id, content: prompt, timestamp: ts() } as AgentMessage });
+  emitInput({ type: 'node_done', runId, nodeId: inputNode.id });
 
   const inputOuts = graph.edges.filter((e) => e.source === inputNode.id);
   if (inputOuts.length === 0) {
@@ -156,14 +173,16 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
 
       const iter = (nodeIter.get(nodeId) ?? 0) + 1;
       nodeIter.set(nodeId, iter);
-      emit({ type: 'node_iteration', runId, nodeId, iteration: iter });
+      const instanceKey = formatInstanceKey(projectId, node.agentNodeKey);
+      emit({ type: 'node_iteration', runId, nodeId, iteration: iter, instanceKey });
+      record?.({ type: 'node_iteration', runId, nodeId, iteration: iter, instanceKey });
 
       const outs = graph.edges.filter((e) => e.source === nodeId);
       const forward = outs.filter((e) => !isBack(e));
       const backs = outs.filter((e) => isBack(e));
       const isDecision = backs.length > 0;
 
-      const outcome = await exec(node, curPrompt, opts);
+      const outcome = await exec(node, curPrompt, opts, iter);
       if (outcome.status === 'aborted') return { status: 'aborted' };
       if (outcome.status === 'error') return { status: 'error', error: outcome.error ?? `node '${nodeId}' failed` };
       const finalText = outcome.finalText ?? '';

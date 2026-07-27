@@ -4,7 +4,9 @@
  * 借鉴 clowder-ai messages.ts（精简：去幂等/whisper/mentions/queue/deliveryMode）。
  */
 import type { FastifyInstance, FastifyPluginCallback } from 'fastify';
-import { buildAgent, getActiveSession, setActiveSession } from '../agents/AgentServiceFactory.js';
+import { buildAgent, getActiveSessionCtx, setActiveSessionCtx } from '../agents/AgentServiceFactory.js';
+import { formatInstanceKey } from '../agents/instance-key.js';
+import { DEFAULT_PROJECT_ID } from '../agents/project-storage.js';
 import { abortRun, registerAbort, unregisterAbort } from '../agents/abort-registry.js';
 import { withNodeLock } from '../agents/node-mutex.js';
 import type { SocketManager } from '../infrastructure/websocket/SocketManager.js';
@@ -38,9 +40,9 @@ const messagesRoutes: FastifyPluginCallback<MessagesRouteOptions> = (app, option
         aborted = true;
       });
       try {
-        await withNodeLock(nodeId, async () => {
-          const { descriptor, service } = await buildAgent(nodeId);
-          const sessionId = getActiveSession(descriptor);
+        await withNodeLock(formatInstanceKey(DEFAULT_PROJECT_ID, nodeId), async () => {
+          const { ctx, service } = await buildAgent(DEFAULT_PROJECT_ID, nodeId);
+          const sessionId = getActiveSessionCtx(ctx);
 
           // 历史直接来自 codex 自己的 transcript（resume 会话），不另存
           socketManager.broadcast(
@@ -50,29 +52,29 @@ const messagesRoutes: FastifyPluginCallback<MessagesRouteOptions> = (app, option
               content: JSON.stringify({ type: 'invoking', invocationId, resume: !!sessionId }),
               timestamp: Date.now(),
             },
-            nodeId,
+            formatInstanceKey(DEFAULT_PROJECT_ID, nodeId),
           );
 
           for await (const msg of service.invoke(content, {
             sessionId,
-            workingDirectory: descriptor.cli.cwd,
+            workingDirectory: ctx.projectPath,
             invocationId,
             signal: controller.signal,
           })) {
             if (msg.type === 'session_init') {
-              setActiveSession(descriptor, msg.sessionId);
+              setActiveSessionCtx(ctx, msg.sessionId);
               continue; // session_init 不广播
             }
             // 广播到前端（历史由 codex transcript 提供）
-            socketManager.broadcast(msg, nodeId);
+            socketManager.broadcast(msg, formatInstanceKey(DEFAULT_PROJECT_ID, nodeId));
           }
           // 用户中止：CLI 被 signal 杀掉，流正常结束但不会有 done → 补一个
           if (aborted) {
             socketManager.broadcast(
               { type: 'system_info', nodeId, content: '已中止', timestamp: Date.now() },
-              nodeId,
+              formatInstanceKey(DEFAULT_PROJECT_ID, nodeId),
             );
-            socketManager.broadcast({ type: 'done', nodeId, timestamp: Date.now() }, nodeId);
+            socketManager.broadcast({ type: 'done', nodeId, timestamp: Date.now() }, formatInstanceKey(DEFAULT_PROJECT_ID, nodeId));
           }
         });
       } catch (err) {

@@ -60,7 +60,7 @@ export function parseNodeKey(nodeKey: string): ParsedNodeKey {
   };
 }
 
-export function nodeKeyOf(descriptor: NodeDescriptor): string {
+export function nodeKeyOf(descriptor: { provider: string; localId: string }): string {
   return formatNodeKey(descriptor.provider, descriptor.localId);
 }
 
@@ -201,3 +201,41 @@ export function resolveDescriptorPaths(descriptor: NodeDescriptor): NodeDescript
     },
   };
 }
+
+// ── V4 schema：画布作用域节点实例（storage tail 相对 nodeDir；cli.cwd 占位 ${PROJECT_PATH}） ──
+// V3（根相对全路径）仅用于迁移读取；新节点一律写 V4。
+const V4CliSchema = z.object({
+  command: z.string(),
+  sandboxMode: z.string().default('danger-full-access'),
+  extraArgs: z.array(z.string()).default([]),
+  promptVia: z.enum(['stdin', 'argv']).default('stdin'),
+  cwd: z.string().default('${PROJECT_PATH}'), // 占位，运行时由 NodeInstanceContext.projectPath 覆盖
+});
+const V4StorageConfigSchema = z.object({
+  identityFile: z.string(), // tail，相对 nodeDir
+  rulesFiles: z.array(z.string()).default([]),
+});
+const V4StorageRuntimeSchema = z.object({
+  activeSessionFile: z.string(), // tail
+  resume: z.boolean().default(true),
+});
+const V4StorageDataSchema = z.object({ cliHome: z.string().optional() }); // tail
+const V4StorageSchema = z.object({
+  config: V4StorageConfigSchema,
+  runtime: V4StorageRuntimeSchema,
+  data: V4StorageDataSchema,
+});
+export const NodeDescriptorV4Schema = z
+  .object({
+    schemaVersion: z.literal(4),
+    localId: LocalIdSchema,
+    name: z.string().trim().min(1),
+    provider: ProviderIdSchema,
+    cli: V4CliSchema,
+    model: z.string().optional(),
+    storage: V4StorageSchema,
+    skills: z.object({ mcp: z.array(z.record(z.unknown())).default([]) }).optional(),
+  })
+  .strict();
+export type NodeDescriptorV4 = z.infer<typeof NodeDescriptorV4Schema>;
+

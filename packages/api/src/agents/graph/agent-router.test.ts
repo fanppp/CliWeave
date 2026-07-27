@@ -43,7 +43,13 @@ function makeExec(aQueue: string[], bQueue: string[]): ExecNode {
 
 async function runWalkAsync(g: Graph, exec: ExecNode, signal?: AbortSignal): Promise<GraphEvent[]> {
   const events: GraphEvent[] = [];
-  const opts: ExecuteOptions = { runId: 'test-run', emit: (e) => events.push(e), ...(signal ? { signal } : {}) };
+  const opts: ExecuteOptions = {
+    runId: 'test-run',
+    projectId: 'default',
+    emit: (e) => events.push(e),
+    record: () => undefined,
+    ...(signal ? { signal } : {}),
+  };
   await walkGraph('需求', g, opts, exec);
   return events;
 }
