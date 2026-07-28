@@ -369,6 +369,27 @@ describe('walkGraph V3 legacy runner', () => {
     assert.ok(bPolicies.every((p) => p.mode === 'fresh'), 'decision 每次 fresh');
     assert.ok(policies.every((p) => p.mode !== 'active'), '图运行全程不传 active → 不触碰 active-session.json');
   });
+
+  it('contextPrefix 前置注入每个节点 prompt', async () => {
+    const seen: string[] = [];
+    const exec: ExecNode = async (node, prompt, opts, _ctx) => {
+      seen.push(prompt);
+      opts.emit({ type: 'node_started', runId: opts.runId, nodeId: node.id });
+      const finalText = node.id === 'B' ? 'review\nVERDICT: APPROVE' : 'A-out';
+      opts.emit({ type: 'node_message', runId: opts.runId, nodeId: node.id, message: { type: 'text', nodeId: node.id, content: finalText, timestamp: Date.now() } });
+      opts.emit({ type: 'node_done', runId: opts.runId, nodeId: node.id });
+      return { status: 'ok', finalText };
+    };
+    const ev: GraphEvent[] = [];
+    const opts: ExecuteOptions = {
+      runId: 't', projectId: 'default',
+      emit: (e) => ev.push(e), record: () => undefined,
+      contextPrefix: '【线程上下文】\n历史对话\n\n',
+    };
+    await walkGraph('需求', makeGraph(3), opts, exec);
+    assert.ok(seen.length > 0, '至少跑了一个节点');
+    assert.ok(seen.every((p) => p.startsWith('【线程上下文】')), '每个节点 prompt 前置 contextPrefix');
+  });
 });
 
 // 防止未用 import 报错

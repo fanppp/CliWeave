@@ -29,6 +29,8 @@ export interface ExecuteOptions {
   /** JSONL 持久化（PersistedRunEvent：公开事件 + 内部检查点）。 */
   record?: (event: PersistedRunEvent) => void;
   signal?: AbortSignal;
+  /** Step 3: Thread 跨轮上下文前缀（serverContext+summary+历史 turns+pins），由 /run/start 一次构造、注入每个节点 prompt。 */
+  contextPrefix?: string;
 }
 
 /** 节点执行上下文（第 4 参，测试 wrapper 必须透传，不依赖少参数赋值）。 */
@@ -241,7 +243,7 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
       const backs = outs.filter((e) => isBack(e));
       const isDecision = backs.length > 0;
 
-      const curPrompt = buildLegacyPrompt(node, prompt, upstreamArtifacts, lastProducerNodeId, latestReview, isDecision);
+      const curPrompt = (opts.contextPrefix ?? '') + buildLegacyPrompt(node, prompt, upstreamArtifacts, lastProducerNodeId, latestReview, isDecision);
       // 会话策略：rework(回边回到 producer) resume 该 producer 的 session；其余 fresh。图运行永不传 active。
       const sessionPolicy: SessionPolicy =
         arrivedViaBack && producerSessions.has(nodeId)

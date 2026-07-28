@@ -25,7 +25,11 @@ const ProjectMetaSchema = z.object({
 });
 export type ProjectMeta = z.infer<typeof ProjectMetaSchema>;
 
-const ProjectLocalSchema = z.object({ path: z.string().min(1) });
+const ProjectLocalSchema = z.object({
+  path: z.string().min(1),
+  /** Step 3: 用户显式设置的地点（serverContext.location 来源；不得从路径/IP 推断）。可选。 */
+  location: z.string().optional(),
+});
 export type ProjectLocal = z.infer<typeof ProjectLocalSchema>;
 
 export const DEFAULT_PROJECT_ID = 'default';

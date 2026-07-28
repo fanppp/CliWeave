@@ -11,6 +11,7 @@ import { getProjectRoot } from '../../utils/project-root.js';
 import { formatInstanceKey } from '../instance-key.js';
 import { projectRunsDir } from '../project-storage.js';
 import type { PersistedRunEvent, GraphEvent } from '../../infrastructure/websocket/SocketManager.js';
+import type { ContextSnapshot } from '../context-builder.js';
 import type { Graph, GraphNode } from './graph.js';
 
 function runFile(projectId: string, runId: string): string {
@@ -31,6 +32,8 @@ export interface RunMeta {
   threadId?: string;
   turnId?: string;
   threadRevision?: number;
+  /** Step 3: 本次注入的上下文快照（included turns/summary/pins/serverContext + 预算估算）。 */
+  contextSnapshot?: ContextSnapshot;
 }
 
 export interface RunSummary {
@@ -67,6 +70,7 @@ export function recordRunStart(
   prompt: string,
   graph: Graph,
   thread?: { threadId: string; turnId: string; threadRevision: number },
+  contextSnapshot?: ContextSnapshot,
 ): void {
   const meta: RunMeta = {
     type: 'run_meta',
@@ -81,6 +85,7 @@ export function recordRunStart(
         .map((n) => [n.id, formatInstanceKey(projectId, n.agentNodeKey)] as const),
     ),
     ...(thread ? { threadId: thread.threadId, turnId: thread.turnId, threadRevision: thread.threadRevision } : {}),
+    ...(contextSnapshot ? { contextSnapshot } : {}),
   };
   getStream(projectId, runId).write(JSON.stringify(meta) + '\n');
 }

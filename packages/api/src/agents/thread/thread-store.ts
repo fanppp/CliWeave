@@ -311,6 +311,39 @@ export function abortPendingTurn(projectId: string, threadId: string, runId: str
   });
 }
 
+// ── memory pin（context-builder 读取；首版无 UI，但事件源已支持）────────
+export function pinMemory(
+  projectId: string,
+  threadId: string,
+  input: { memoryId: string; content: string; sourceTurnIds?: string[] },
+): Promise<void> {
+  return withNodeLock(`thread:${projectId}:${threadId}`, async () => {
+    const meta = readThread(projectId, threadId);
+    if (!meta) return;
+    appendThreadEvent(projectId, threadId, {
+      type: 'memory_pinned',
+      memoryId: input.memoryId,
+      content: input.content,
+      sourceTurnIds: input.sourceTurnIds ?? [],
+      createdAt: Date.now(),
+    });
+    writeThreadMeta(projectId, { ...meta, updatedAt: Date.now() });
+  });
+}
+
+export function unpinMemory(projectId: string, threadId: string, memoryId: string): Promise<void> {
+  return withNodeLock(`thread:${projectId}:${threadId}`, async () => {
+    const meta = readThread(projectId, threadId);
+    if (!meta) return;
+    appendThreadEvent(projectId, threadId, {
+      type: 'memory_unpinned',
+      memoryId,
+      createdAt: Date.now(),
+    });
+    writeThreadMeta(projectId, { ...meta, updatedAt: Date.now() });
+  });
+}
+
 // ── pending run 持久化（create↔start 之间）─────────────────────
 export function writePendingRun(p: PendingRun): void {
   writeAtomic(pendingRunFile(p.projectId, p.runId), JSON.stringify(p, null, 2) + '\n');

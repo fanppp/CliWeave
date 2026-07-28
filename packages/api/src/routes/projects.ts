@@ -45,6 +45,7 @@ import {
 import { resolveInstanceDescriptorPaths } from '../agents/node-instance.js';
 import { executeGraph } from '../agents/graph/AgentRouter.js';
 import { invokeAgentWithPolicy } from '../agents/invoke-agent.js';
+import { buildThreadContext, buildServerContext } from '../agents/context-builder.js';
 import {
   closeRunStream,
   listRuns,
@@ -715,12 +716,17 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
       const controller = registerAbort(runId);
       const regEntry = getRun(runId);
       if (regEntry) regEntry.controller = controller;
+      // Step 3: 构造 Thread 跨轮上下文前缀（serverContext + 历史 turns）注入每个节点 prompt；快照入 run_meta
+      const local = readProjectLocal(projectId);
+      const serverContext = buildServerContext(local?.location);
+      const { prefix: contextPrefix, snapshot: contextSnapshot } = buildThreadContext(projectId, threadId, { serverContext });
       recordRunStart(
         projectId,
         runId,
         prompt,
         graph,
-        threadId ? { threadId, turnId, threadRevision } : undefined,
+        { threadId, turnId, threadRevision },
+        contextSnapshot,
       );
       reply.code(202).send({ status: 'started', runId });
 
@@ -728,6 +734,7 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
         executeGraph(prompt, graph, {
           runId,
           projectId,
+          contextPrefix,
           emit: (event) => {
             socketManager.broadcastGraph(event);
             // 终态由事件决定（finally 只清理，不得覆盖 done/error/aborted）+ Thread turn 生命周期
