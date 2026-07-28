@@ -9,33 +9,48 @@ import { Server as SocketIOServer, type Socket } from 'socket.io';
 import { isInstanceKey } from '../../agents/instance-key.js';
 import type { AgentMessage } from '../../agents/types.js';
 
-/** 图运行向前端广播的 envelope（不与单节点 bare done 混淆）。 */
-export type GraphEvent =
+/**
+ * 图运行事件类型（分型，防 Phase 2a 的 run_state/branch_checkpoint 被误广播）。
+ * - PublicGraphEvent：可经 SocketManager.broadcastGraph 广播给前端。
+ * - PersistedRunEvent：可经 record 落盘 JSONL = 公开事件 + 内部事件（run_state/branch_checkpoint 仅落盘，不广播）。
+ */
+export type PublicGraphEvent =
   | { type: 'node_started'; runId: string; nodeId: string; instanceKey?: string; cached?: boolean }
   | { type: 'node_iteration'; runId: string; nodeId: string; iteration: number; instanceKey?: string }
   | { type: 'node_message'; runId: string; nodeId: string; message: AgentMessage; instanceKey?: string; cached?: boolean }
   | { type: 'node_done'; runId: string; nodeId: string; instanceKey?: string; cached?: boolean }
   | { type: 'node_error'; runId: string; nodeId: string; error: string; instanceKey?: string }
   | {
-      type: 'run_done';
-      runId: string;
-      finalText: string;
-      /** completed=自然结束；best_effort=回边预算耗尽后 best-effort 放行（Phase1 新）；edge_limit=旧 V3 历史回放兼容；global_limit=全局执行上限。 */
-      termination: 'completed' | 'best_effort' | 'edge_limit' | 'global_limit';
-      reason?: string;
-    }
-  | {
       /** 回边预算耗尽：best-effort 放行（仍产出最后审核+producer artifact 作质量报告）。 */
       type: 'gate_exhausted';
       runId: string;
       nodeId: string;
+      instanceKey?: string;
       edgeId: string;
       reason: string;
       lastProducerArtifact: string;
       reviewerFeedback: string | null;
+      timestamp: number;
+    }
+  | {
+      type: 'run_done';
+      runId: string;
+      finalText: string;
+      /** completed=自然结束；best_effort=回边预算耗尽后 best-effort 放行；edge_limit=旧 V3 历史回放兼容；global_limit=全局执行上限。 */
+      termination: 'completed' | 'best_effort' | 'edge_limit' | 'global_limit';
+      reason?: string;
     }
   | { type: 'run_aborted'; runId: string }
   | { type: 'run_error'; runId: string; error: string };
+
+/** 内部持久化事件（Phase 2a 起用：durable pause/resume 的检查点，仅落盘不广播）。 */
+export type PersistedRunEvent =
+  | PublicGraphEvent
+  | { type: 'run_state'; runId: string; phase: string; payload: unknown }
+  | { type: 'branch_checkpoint'; runId: string; branchId: string; payload: unknown };
+
+/** @deprecated 用 PublicGraphEvent（保留别名供过渡）。 */
+export type GraphEvent = PublicGraphEvent;
 
 export class SocketManager {
   private readonly io: SocketIOServer;

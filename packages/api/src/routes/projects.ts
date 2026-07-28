@@ -522,7 +522,8 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
               socketManager.broadcast({ type: 'done', nodeId: nodeKey, timestamp: Date.now() }, instanceKey);
             }
           });
-          transitionRunStatus(invocationId, 'done');
+          // 终态由结果决定：aborted 不覆盖成 done
+          transitionRunStatus(invocationId, aborted ? 'aborted' : 'done');
         } catch (err) {
           socketManager.broadcast({ type: 'error', nodeId: nodeKey, error: `节点调用失败: ${(err as Error).message}`, timestamp: Date.now() }, instanceKey);
           socketManager.broadcast({ type: 'done', nodeId: nodeKey, timestamp: Date.now() }, instanceKey);
@@ -601,6 +602,10 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
           projectId,
           emit: (event) => {
             socketManager.broadcastGraph(event);
+            // 终态由事件决定（finally 只清理，不得覆盖 done/error/aborted）
+            if (event.type === 'run_done') transitionRunStatus(runId, 'done');
+            else if (event.type === 'run_error') transitionRunStatus(runId, 'error');
+            else if (event.type === 'run_aborted') transitionRunStatus(runId, 'aborted');
           },
           record: (event) => {
             recordRunEvent(projectId, runId, event);
@@ -608,11 +613,12 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
           signal: controller.signal,
         })
           .catch((err) => {
-            socketManager.broadcastGraph({ type: 'run_error', runId, error: `graph execution crashed: ${(err as Error).message}` });
+            const msg = `graph execution crashed: ${(err as Error).message}`;
+            socketManager.broadcastGraph({ type: 'run_error', runId, error: msg });
+            transitionRunStatus(runId, 'error');
           })
           .finally(() => {
             unregisterAbort(runId);
-            transitionRunStatus(runId, 'done');
             closeRunStream(projectId, runId);
           });
       });

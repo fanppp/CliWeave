@@ -8,6 +8,7 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import type { CliSpawnOptions, ChildProcessLike, SpawnFn } from './cli-types.js';
 import { isParseError, parseNDJSON } from './ndjson-parser.js';
+import { registerPid, unregisterPid } from '../agents/child-process-registry.js';
 
 const IS_WINDOWS = process.platform === 'win32';
 const KILL_GRACE_MS = 3_000;
@@ -53,6 +54,11 @@ export async function* spawnCli(
     stdio: [options.stdinInput != null ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     ...((options.shell ?? IS_WINDOWS) ? { shell: true } : { shell: false }),
   });
+
+  // 登记 PID 到 ChildProcessRegistry（迁移活跃检查用；best-effort，Windows shell:true 的 pid 可能只是 cmd.exe）
+  if (options.invocationId && options.runId && child.pid !== undefined) {
+    registerPid(options.invocationId, child.pid, options.runId);
+  }
 
   // prompt 经 stdin
   if (options.stdinInput != null && child.stdin) {
@@ -173,6 +179,7 @@ export async function* spawnCli(
     if (options.signal) options.signal.removeEventListener('abort', abortHandler);
     process.off('exit', exitHandler);
     killChild();
+    if (options.invocationId) unregisterPid(options.invocationId);
   }
 }
 

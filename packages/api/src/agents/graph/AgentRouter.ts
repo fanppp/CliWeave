@@ -12,20 +12,20 @@
  */
 import { buildAgent, getActiveSessionCtx, setActiveSessionCtx } from '../AgentServiceFactory.js';
 import { formatInstanceKey } from '../instance-key.js';
-import { formatSubInvocationId } from '../run-registry.js';
+import { formatSubInvocationId, registerSubInvocation, removeSubInvocation } from '../run-registry.js';
 import { withNodeLock } from '../node-mutex.js';
 import { computeBackEdges, DEFAULT_BACK_EDGE_MAX_ITER, type Graph, type GraphAgentNode, type GraphEdge } from './graph.js';
 import { extractVerdict, type TrailEntry, type Verdict, type VerdictContext } from './verdict.js';
 import type { AgentMessage } from '../types.js';
-import type { GraphEvent } from '../../infrastructure/websocket/SocketManager.js';
+import type { PublicGraphEvent, PersistedRunEvent } from '../../infrastructure/websocket/SocketManager.js';
 
 export interface ExecuteOptions {
   runId: string;
   projectId: string;
-  /** WS 广播（公开形，M8 run_paused 可携带原始 resumeToken）。 */
-  emit: (event: GraphEvent) => void;
-  /** JSONL 持久化（持久形，token 须由调用方/recordRunEvent 净化为 hash）。 */
-  record?: (event: GraphEvent) => void;
+  /** WS 广播（仅 PublicGraphEvent；run_state/branch_checkpoint 不得经此广播，防内部事件泄漏前端）。 */
+  emit: (event: PublicGraphEvent) => void;
+  /** JSONL 持久化（PersistedRunEvent：公开事件 + 内部检查点）。 */
+  record?: (event: PersistedRunEvent) => void;
   signal?: AbortSignal;
 }
 
@@ -45,10 +45,11 @@ function ts(): number {
 export async function runAgentNode(node: GraphAgentNode, nodePrompt: string, opts: ExecuteOptions, iteration: number = 0): Promise<NodeOutcome> {
   const { runId, projectId, emit, record, signal } = opts;
   const instanceKey = formatInstanceKey(projectId, node.agentNodeKey);
-  const emitBoth = (e: GraphEvent): void => {
+  const emitBoth = (e: PublicGraphEvent): void => {
     emit(e);
     record?.(e);
   };
+  let subInvocationId = '';
   try {
     return await withNodeLock(instanceKey, async () => {
       if (signal?.aborted) return { status: 'aborted' } satisfies NodeOutcome;
@@ -56,12 +57,15 @@ export async function runAgentNode(node: GraphAgentNode, nodePrompt: string, opt
       const { ctx, service } = await buildAgent(projectId, node.agentNodeKey);
       const sessionId = getActiveSessionCtx(ctx);
       const texts: string[] = [];
-      const subInvocationId = formatSubInvocationId(runId, node.id, iteration);
+      subInvocationId = formatSubInvocationId(runId, node.id, iteration);
+      // 登记 sub-invocation（RunRegistry，供按 run 查询/审计）；spawnCli 据 invocationId+runId 登记 PID
+      registerSubInvocation({ subInvocationId, parentRunId: runId, projectId, instanceKey, createdAt: Date.now() });
 
       for await (const msg of service.invoke(nodePrompt, {
         sessionId,
         workingDirectory: ctx.projectPath,
         invocationId: subInvocationId,
+        runId,
         ...(signal ? { signal } : {}),
       })) {
         if (msg.type === 'session_init') {
@@ -93,28 +97,33 @@ export async function runAgentNode(node: GraphAgentNode, nodePrompt: string, opt
     const error = (err as Error).message;
     emitBoth({ type: 'node_error', runId, nodeId: node.id, instanceKey, error });
     return { status: 'error', error };
+  } finally {
+    // 清理 sub-invocation 注册（PID 由 spawnCli 自行注销；此处仅清 RunRegistry 索引）
+    if (subInvocationId) removeSubInvocation(subInvocationId);
   }
 }
 
 /**
- * 构造 prompt（V3 legacy runner）：稳定三分区，显式状态，不反查 trail。
- * - decision：只读 lastProducerArtifact，不消费旧 review metadata（自己生成 metadata）。
+ * 构造 prompt（V3 legacy）：稳定三分区，显式状态，不反查 trail。
+ * - decision：只读上游产物（聚合），不消费旧 review metadata（自己生成 metadata）。
  * - producer rework（target===lastProducerNodeId）：【上游产物】=你的上一版 + 【审核元数据】→ 修改。
- * - producer forward：【上游产物】+ 可选【审核元数据】→ 继续。
+ * - producer forward/join：【上游产物】（多上游用 --- 拼接）+ 可选【审核元数据】→ 继续。
  * 不变量：【上游产物】只含 producer artifact；reviewer 文本永不入此区；reviewer output 不成为 lastProducerArtifact。
+ * join 节点（多前向入边）聚合所有上游产物，等齐再跑一次（不再每来一个上游跑一次）。
  */
 function buildLegacyPrompt(
   _node: GraphAgentNode,
   input: string,
-  lastProducerArtifact: string,
+  upstreamArtifacts: string[],
   lastProducerNodeId: string | null,
   latestReview: { approved: boolean; feedback: string } | null,
   isDecision: boolean,
 ): string {
+  const artifactBlob = upstreamArtifacts.length > 0 ? upstreamArtifacts.join('\n---\n') : '';
   if (isDecision) {
-    return `【原始需求】\n${input}\n\n【待裁定内容】\n${lastProducerArtifact || '(无)'}\n\n请判定并在结尾输出一行 \`VERDICT: APPROVE\`（满意）或 \`VERDICT: REJECT\`（不满意），其后附反馈。`;
+    return `【原始需求】\n${input}\n\n【待裁定内容】\n${artifactBlob || '(无)'}\n\n请判定并在结尾输出一行 \`VERDICT: APPROVE\`（满意）或 \`VERDICT: REJECT\`（不满意），其后附反馈。`;
   }
-  const artifactSection = `【上游产物】\n${lastProducerArtifact || '(无)'}`;
+  const artifactSection = `【上游产物】\n${artifactBlob || '(无)'}`;
   const reviewSection = latestReview
     ? `\n\n【审核元数据】\nVERDICT: ${latestReview.approved ? 'APPROVE' : 'REJECT'}\n反馈: ${latestReview.feedback}`
     : '';
@@ -138,7 +147,7 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
   const isBack = (e: GraphEdge): boolean => backEdges.has(e.id);
 
   let finished = false;
-  const finish = (ev: GraphEvent): void => {
+  const finish = (ev: PublicGraphEvent): void => {
     if (finished) return;
     finished = true;
     emit(ev);
@@ -146,7 +155,7 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
   };
 
   // input 伪节点
-  const emitInput = (ev: GraphEvent): void => {
+  const emitInput = (ev: PublicGraphEvent): void => {
     emit(ev);
     record?.(ev);
   };
@@ -160,11 +169,15 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
     return;
   }
 
-  // 分支间共享：节点迭代计数、回边覆盖计数、全局执行上限、最后完成输出（兜底）
+  // 分支间共享：节点迭代计数、回边覆盖计数、全局执行上限、join 汇聚缓冲
   const nodeIter = new Map<string, number>();
   const edgeCount = new Map<string, number>();
   let totalExec = 0;
-  let lastCompletedOutput = '';
+  // 前向入度（仅前向边）：join 节点 >1。arrival 时 deposit 产物，等齐所有前向上游再跑一次（聚合产物）。
+  const forwardInDegree = new Map<string, number>();
+  for (const n of graph.nodes) forwardInDegree.set(n.id, 0);
+  for (const e of graph.edges) if (!isBack(e)) forwardInDegree.set(e.target, (forwardInDegree.get(e.target) ?? 0) + 1);
+  const joinBuffer = new Map<string, Map<string, string>>();
 
   type BranchResult =
     | { status: 'completed'; output: string }
@@ -178,9 +191,11 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
    * 决策点解析 verdict→满意前向/不满意回边；回边覆盖达 maxIter → best-effort（改走前向 + 发 gate_exhausted），不硬终止。
    * producer 产出后清 review metadata（gap4）；bestEffortUsed 跟随分支，下游成功不抹掉 best-effort 事实（gap1）。
    */
-  async function walkBranch(startId: string, branchPrompt: string): Promise<BranchResult> {
-    let nodeId = startId;
-    let curPrompt = branchPrompt;
+  async function walkBranch(startEdge: GraphEdge, branchPrompt: string): Promise<BranchResult> {
+    let inEdge: GraphEdge | null = startEdge;
+    let nodeId = startEdge.target;
+    let carriedArtifact = branchPrompt;
+    let arrivedViaBack = false; // 首层经 input 前向边到达
     const trail: TrailEntry[] = [];
     let lastProducerArtifact = '';
     let lastProducerNodeId: string | null = null;
@@ -198,8 +213,28 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
     while (true) {
       if (signal?.aborted) return { status: 'aborted' };
       if (++totalExec > maxExec) return { status: 'global_limit', output: lastProducerArtifact };
+
+      // ── JOIN 汇聚：前向到达时 deposit 产物，等齐所有前向上游再跑一次（聚合）。
+      // 非_agent（end 等）：本分支产出 = lastProducerArtifact，不经 join（end 是汇点，各分支独立完成）
       const node = byId.get(nodeId);
       if (!node || node.type !== 'agent') return finalize(lastProducerArtifact);
+
+      // ── JOIN 汇聚：前向到达时 deposit 产物，等齐所有前向上游再跑一次（聚合）。
+      // 回边（rework）旁路 join——同分支内循环重做，不重复 deposit。
+      let upstreamArtifacts: string[];
+      if (arrivedViaBack) {
+        upstreamArtifacts = [carriedArtifact];
+      } else {
+        const need = forwardInDegree.get(nodeId) ?? 0;
+        const buf = joinBuffer.get(nodeId) ?? new Map<string, string>();
+        if (inEdge) buf.set(inEdge.id, carriedArtifact);
+        joinBuffer.set(nodeId, buf);
+        if (need > 1 && buf.size < need) {
+          // 上游未齐：本分支贡献产物后终止，join 节点由最后到达者跑
+          return finalize('');
+        }
+        upstreamArtifacts = need > 0 ? [...buf.values()] : [carriedArtifact];
+      }
 
       const iter = (nodeIter.get(nodeId) ?? 0) + 1;
       nodeIter.set(nodeId, iter);
@@ -212,6 +247,7 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
       const backs = outs.filter((e) => isBack(e));
       const isDecision = backs.length > 0;
 
+      const curPrompt = buildLegacyPrompt(node, prompt, upstreamArtifacts, lastProducerNodeId, latestReview, isDecision);
       const outcome = await exec(node, curPrompt, opts, iter);
       if (outcome.status === 'aborted') return { status: 'aborted' };
       if (outcome.status === 'error') return { status: 'error', error: outcome.error ?? `node '${nodeId}' failed` };
@@ -220,7 +256,6 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
       const vctx: VerdictContext = { runId, nodeId, iteration: iter, finalText, trail };
       const verdict: Verdict | null = isDecision ? extractVerdict(node, vctx) : null;
       trail.push({ nodeId, output: finalText, verdict: verdict ?? undefined, iter });
-      lastCompletedOutput = finalText;
 
       // 显式状态（gap4）：producer 产出→设 artifact+清 review；decision→设 review（不碰 artifact）。
       if (isDecision) {
@@ -245,7 +280,7 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
         if (used >= cap) {
           bestEffortUsed = true;
           bestEffortReason = `gate '${chosen.id}' exhausted (maxIterations ${cap}); best-effort forward`;
-          const exEv = { type: 'gate_exhausted', runId, nodeId, edgeId: chosen.id, reason: bestEffortReason, lastProducerArtifact, reviewerFeedback: latestReview?.feedback ?? null } as const;
+          const exEv = { type: 'gate_exhausted', runId, nodeId, instanceKey, edgeId: chosen.id, reason: bestEffortReason, lastProducerArtifact, reviewerFeedback: latestReview?.feedback ?? null, timestamp: Date.now() } as const;
           emit(exEv);
           record?.(exEv);
           const continuation = forward[0];
@@ -256,8 +291,11 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
           const tgtId = chosen.target;
           const targetNode = byId.get(tgtId);
           if (!targetNode || targetNode.type !== 'agent') return finalize(lastProducerArtifact);
+          // rework：回边旁路 join（同分支内循环重做）
+          inEdge = chosen;
           nodeId = tgtId;
-          curPrompt = buildLegacyPrompt(targetNode, prompt, lastProducerArtifact, lastProducerNodeId, latestReview, graph.edges.some((e) => e.source === tgtId && isBack(e)));
+          carriedArtifact = lastProducerArtifact;
+          arrivedViaBack = true;
           continue;
         }
       }
@@ -267,13 +305,15 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
       if (graph.endNode && fwdId === graph.endNode) return finalize(lastProducerArtifact);
       const targetNode = byId.get(fwdId);
       if (!targetNode || targetNode.type !== 'agent') return finalize(lastProducerArtifact);
+      inEdge = chosen;
       nodeId = fwdId;
-      curPrompt = buildLegacyPrompt(targetNode, prompt, lastProducerArtifact, lastProducerNodeId, latestReview, graph.edges.some((e) => e.source === fwdId && isBack(e)));
+      carriedArtifact = lastProducerArtifact;
+      arrivedViaBack = false;
     }
   }
 
-  // 并行跑所有首层分支
-  const results = await Promise.all(inputOuts.map((e) => walkBranch(e.target, prompt)));
+  // 并行跑所有首层分支（各分支在 join 节点汇聚：等齐所有前向上游再跑一次）
+  const results = await Promise.all(inputOuts.map((e) => walkBranch(e, prompt)));
 
   if (results.some((r) => r.status === 'aborted')) {
     finish({ type: 'run_aborted', runId });
@@ -286,14 +326,22 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
   }
   const glRes = results.find((r): r is Extract<BranchResult, { status: 'global_limit' }> => r.status === 'global_limit');
   if (glRes) {
-    finish({ type: 'run_done', runId, finalText: glRes.output || lastCompletedOutput, termination: 'global_limit', reason: `exceeded maxNodeExecutions ${maxExec}` });
+    if (!glRes.output) {
+      finish({ type: 'run_error', runId, error: 'global execution limit reached with no producer artifact' });
+    } else {
+      finish({ type: 'run_done', runId, finalText: glRes.output, termination: 'global_limit', reason: `exceeded maxNodeExecutions ${maxExec}` });
+    }
     return;
   }
-  // 各分支产出用 --- 拼接；无任何产出 → 兜底最后完成输出
+  // 各分支 producer 产出用 --- 拼接；无任何 producer artifact → run_error（reviewer 文本永不成为 payload）
   const finalText = results
     .filter((r): r is Extract<BranchResult, { output: string }> => 'output' in r && r.output !== '')
     .map((r) => r.output)
-    .join('\n\n---\n\n') || lastCompletedOutput;
+    .join('\n\n---\n\n');
+  if (!finalText) {
+    finish({ type: 'run_error', runId, error: 'no producer artifact produced (reviewer output is never payload)' });
+    return;
+  }
   // 优先级：best_effort > completed（下游成功不抹掉上游 best-effort 事实，gap1）
   const beRes = results.find((r): r is Extract<BranchResult, { status: 'best_effort' }> => r.status === 'best_effort');
   if (beRes) {

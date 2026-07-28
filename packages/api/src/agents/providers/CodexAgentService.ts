@@ -130,6 +130,7 @@ export class CodexAgentService implements AgentService {
       env: codexEnv(codexHome),
       ...(options?.signal ? { signal: options.signal } : {}),
       ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
+      ...(options?.runId ? { runId: options.runId } : {}),
     };
 
     let sawSubstantiveOutput = false;

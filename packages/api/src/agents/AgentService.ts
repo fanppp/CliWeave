@@ -14,8 +14,10 @@ export interface AgentServiceOptions {
   signal?: AbortSignal;
   /** 该节点编译后的 L0（identity + rules），由 provider 按 CLI 方式注入 */
   compiledL0?: string;
-  /** 调用追踪 id（日志/超时诊断） */
+  /** 调用追踪 id（日志/超时诊断；图运行= subInvocationId，spawnCli 据此登记 PID） */
   invocationId?: string;
+  /** 父 run id（图运行= runId；spawnCli 据此关联子进程到 run，供迁移活跃检查） */
+  runId?: string;
 }
 
 export interface AgentService {

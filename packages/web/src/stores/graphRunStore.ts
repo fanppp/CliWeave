@@ -37,10 +37,12 @@ export type GraphEvent =
       type: 'gate_exhausted';
       runId: string;
       nodeId: string;
+      instanceKey?: string;
       edgeId: string;
       reason: string;
       lastProducerArtifact: string;
       reviewerFeedback: string | null;
+      timestamp: number;
     }
   | {
       type: 'run_done';
@@ -246,7 +248,7 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
             role: 'system',
             content,
             eventType: 'gate_exhausted',
-            timestamp: Date.now(),
+            timestamp: event.timestamp,
           };
           return { ...s, bubbles: [...s.bubbles, bubble] };
         }

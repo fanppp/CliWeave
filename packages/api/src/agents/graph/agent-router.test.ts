@@ -304,6 +304,43 @@ describe('walkGraph V3 legacy runner', () => {
     assert.equal(region(dPrompt, '上游产物'), 'C-artifact');
     assert.ok(!dPrompt.includes('【审核元数据】'), 'D 不收到过期 metadata（C 产出已清）');
   });
+
+  it('convergence：多前向上游的 join 节点等齐再跑一次、聚合所有上游产物（不再每来一个上游跑一次）', async () => {
+    // input→A→B(decision, back→A, forward→C) + input→C(直连)
+    // C 有两条前向入边（input 直连 + B approve 前向）：应等齐两上游再跑一次，聚合产物
+    const g: Graph = {
+      schemaVersion: 3, inputNode: '__input__', maxNodeExecutions: 50,
+      nodes: [
+        { id: '__input__', type: 'input' },
+        { id: 'A', type: 'agent', agentNodeKey: 'codex:coder' },
+        { id: 'B', type: 'agent', agentNodeKey: 'claude:claude-node' },
+        { id: 'C', type: 'agent', agentNodeKey: 'codex:coder2' },
+      ],
+      edges: [
+        { id: '__input__->A', source: '__input__', target: 'A' },
+        { id: 'A->B', source: 'A', target: 'B' },
+        { id: 'B->A', source: 'B', target: 'A', maxIterations: 3 }, // 回边：B 决策点
+        { id: 'B->C', source: 'B', target: 'C' },                   // B approve→C
+        { id: '__input__->C', source: '__input__', target: 'C' },   // input 直连 C（join 第二入边）
+      ],
+    };
+    const { exec, prompts } = makeScriptedExec({
+      A: ['A-artifact'],
+      B: ['review\nVERDICT: APPROVE'],
+      C: ['C-artifact'],
+    });
+    const ev = await runWalkAsync(g, exec);
+    const t = terminal(ev) as { type: string; termination: string; finalText: string };
+    assert.equal(t.termination, 'completed');
+    assert.equal(t.finalText, 'C-artifact');
+    // C 只跑一次（不再每来一个上游跑一次）
+    const cPrompts = prompts['C'] ?? [];
+    assert.equal(cPrompts.length, 1, 'C runs exactly once (join)');
+    // C 的【上游产物】聚合两上游：input 直连产物(需求) + B 路径的 producer 产物(A-artifact)
+    const upstream = region(cPrompts[0], '上游产物');
+    assert.ok(upstream.includes('需求'), 'C 聚合 input 直连产物');
+    assert.ok(upstream.includes('A-artifact'), 'C 聚合 B 路径的 producer 产物');
+  });
 });
 
 // 防止未用 import 报错

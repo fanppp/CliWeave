@@ -16,7 +16,10 @@ export interface CliSpawnOptions {
   shell?: boolean;
   /** prompt 经 stdin 传入（防 ps 泄露对话）。设此项则 stdio[0]='pipe' */
   stdinInput?: string;
+  /** 调用追踪 id（图运行= subInvocationId）；spawnCli 据此登记/注销 PID（ChildProcessRegistry） */
   invocationId?: string;
+  /** 父 run id（图运行= runId）；与 invocationId 一起登记子进程，供迁移活跃检查 */
+  runId?: string;
 }
 
 export interface ChildProcessLike {

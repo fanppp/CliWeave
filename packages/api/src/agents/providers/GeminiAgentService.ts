@@ -53,6 +53,7 @@ export class GeminiAgentService implements AgentService {
       env: {},
       ...(options?.signal ? { signal: options.signal } : {}),
       ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
+      ...(options?.runId ? { runId: options.runId } : {}),
     };
 
     let terminalYielded = false;

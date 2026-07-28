@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { getProjectRoot } from '../../utils/project-root.js';
 import { formatInstanceKey } from '../instance-key.js';
 import { projectRunsDir } from '../project-storage.js';
-import type { GraphEvent } from '../../infrastructure/websocket/SocketManager.js';
+import type { PersistedRunEvent, GraphEvent } from '../../infrastructure/websocket/SocketManager.js';
 import type { Graph, GraphNode } from './graph.js';
 
 function runFile(projectId: string, runId: string): string {
@@ -71,8 +71,8 @@ export function recordRunStart(projectId: string, runId: string, prompt: string,
   getStream(projectId, runId).write(JSON.stringify(meta) + '\n');
 }
 
-/** 追加一个 envelope 事件。防御性净化：原始 resumeToken 不得进 JSONL（M8 须发 hash 形）。 */
-export function recordRunEvent(projectId: string, runId: string, event: GraphEvent): void {
+/** 追加一个 envelope 事件（公开或内部检查点）。防御性净化：原始 resumeToken 不得进 JSONL（M8 须发 hash 形）。 */
+export function recordRunEvent(projectId: string, runId: string, event: PersistedRunEvent): void {
   if ('resumeToken' in event && typeof (event as { resumeToken?: unknown }).resumeToken === 'string') {
     throw new Error(`recordRunEvent: raw resumeToken must not be persisted (use resumeTokenHash); event type=${event.type}`);
   }

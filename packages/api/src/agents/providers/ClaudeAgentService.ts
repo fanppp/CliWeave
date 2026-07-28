@@ -90,6 +90,7 @@ export class ClaudeAgentService implements AgentService {
       env: claudeEnv(claudeHome),
       ...(options?.signal ? { signal: options.signal } : {}),
       ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
+      ...(options?.runId ? { runId: options.runId } : {}),
     };
 
     let sawOutput = false;

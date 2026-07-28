@@ -59,6 +59,7 @@ export class OpenCodeAgentService implements AgentService {
       env: opencodeXdgEnv(opencodeHome),
       ...(options?.signal ? { signal: options.signal } : {}),
       ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
+      ...(options?.runId ? { runId: options.runId } : {}),
     };
 
     let terminalYielded = false;
