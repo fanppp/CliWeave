@@ -212,10 +212,20 @@ export function GraphCanvas() {
   }, [projectId, loadProjectGraph]);
 
   // graph / agentNameMap 变化 → 同步 nodes + edges（带回边样式 + 节点 label）
+  // 用函数式更新保留当前 selected：saveGraph 乐观更新会改 graph 引用，若直接覆盖会丢选中
   useEffect(() => {
     const bid = computeBackEdgeIds(graph?.nodes ?? [], (graph?.edges ?? []) as unknown as FlowEdge[]);
-    setEdges(toFlowEdges(graph, bid));
-    if (graph) setNodes(toFlowNodes(graph, agentNameMap));
+    setEdges((prev) => {
+      const next = toFlowEdges(graph, bid);
+      const sel = new Set(prev.filter((e) => e.selected).map((e) => e.id));
+      return next.map((e) => (sel.has(e.id) ? { ...e, selected: true } : e));
+    });
+    setNodes((prev) => {
+      if (!graph) return prev;
+      const next = toFlowNodes(graph, agentNameMap);
+      const sel = new Set(prev.filter((n) => n.selected).map((n) => n.id));
+      return next.map((n) => (sel.has(n.id) ? { ...n, selected: true } : n));
+    });
     skipCommit.current = true; // 程序化重置不触发 commit
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graph, agentNameMap]);

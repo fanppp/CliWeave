@@ -75,9 +75,20 @@ input {
   border-color: var(--success) !important;
 }
 
-/* xyflow：节点主体用 default 光标（仍可拖动），减少 grab 小手与选中/点边的冲突 */
-.react-flow__node { cursor: default !important; }
-.react-flow__node.selectable:focus { cursor: default !important; }
+/* xyflow：节点 hover 恒 default（消除 grab 小手闪烁，与选中/点边冲突）；仅实际拖拽时 grabbing */
+.react-flow__node,
+.react-flow__node.draggable,
+.react-flow__node.selectable,
+.react-flow__node.draggable.selectable,
+.react-flow__node .react-flow__handle,
+.react-flow__node .react-flow__node-content {
+  cursor: default !important;
+}
+.react-flow__node.dragging {
+  cursor: grabbing !important;
+}
+.react-flow__pane { cursor: default !important; }
+.react-flow__pane.dragging { cursor: grabbing !important; }
 .react-flow__edge-path { cursor: pointer; }
 /* 选中边：加粗 + 发光，并互斥节点焦点 */
 .react-flow__edge.selected .react-flow__edge-path {

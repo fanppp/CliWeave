@@ -331,6 +331,7 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
       }
       return {
         nodeKey,
+        descriptor: ctx.descriptor,
         provider: ctx.descriptor.provider,
         localId: ctx.descriptor.localId,
         name: ctx.descriptor.name,
