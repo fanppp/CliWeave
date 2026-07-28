@@ -22,8 +22,12 @@ export interface RunRegistryEntry {
   status: RunStatus;
   controller?: AbortController;
   createdAt: number;
-  /** M8 预留：分支状态聚合。 */
+  /** M8 分支状态预留（M5 不使用）。 */
   branches?: Record<string, BranchStatus>;
+  /** Step 2: 图运行归属的 Thread（单节点消息无）。 */
+  threadId?: string;
+  /** Step 2: 对应 Thread 的 turnId。 */
+  turnId?: string;
 }
 
 export interface SubInvocation {

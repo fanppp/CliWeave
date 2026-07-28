@@ -27,6 +27,10 @@ export interface RunMeta {
   graph: Graph;
   /** 仅 agent 图节点 → instanceKey（input/end 无 instanceKey，故 Partial）。重放/审计用。 */
   graphNodeInstances: Partial<Record<string, string>>;
+  /** Step 2: 归属 Thread + turn + 开轮时的 revision（重放/审计用；旧 run 无则缺省）。 */
+  threadId?: string;
+  turnId?: string;
+  threadRevision?: number;
 }
 
 export interface RunSummary {
@@ -35,6 +39,9 @@ export interface RunSummary {
   prompt: string;
   createdAt: number;
   status: 'done' | 'error' | 'aborted' | 'unknown';
+  /** Step 2: 归属 Thread（旧 run 无则缺省）。 */
+  threadId?: string;
+  turnId?: string;
 }
 
 const openStreams = new Map<string, WriteStream>();
@@ -53,8 +60,14 @@ function getStream(projectId: string, runId: string): WriteStream {
   return stream;
 }
 
-/** 运行开始：写 run_meta 首行（完整 graph 快照 + graphNodeInstances）。 */
-export function recordRunStart(projectId: string, runId: string, prompt: string, graph: Graph): void {
+/** 运行开始：写 run_meta 首行（完整 graph 快照 + graphNodeInstances + thread 关联）。 */
+export function recordRunStart(
+  projectId: string,
+  runId: string,
+  prompt: string,
+  graph: Graph,
+  thread?: { threadId: string; turnId: string; threadRevision: number },
+): void {
   const meta: RunMeta = {
     type: 'run_meta',
     runId,
@@ -67,6 +80,7 @@ export function recordRunStart(projectId: string, runId: string, prompt: string,
         .filter((n): n is Extract<GraphNode, { type: 'agent' }> => n.type === 'agent' && 'agentNodeKey' in n && !!n.agentNodeKey)
         .map((n) => [n.id, formatInstanceKey(projectId, n.agentNodeKey)] as const),
     ),
+    ...(thread ? { threadId: thread.threadId, turnId: thread.turnId, threadRevision: thread.threadRevision } : {}),
   };
   getStream(projectId, runId).write(JSON.stringify(meta) + '\n');
 }
@@ -137,7 +151,15 @@ export function listRuns(projectId: string, limit = 20): RunSummary[] {
       else if (last.type === 'run_error') status = 'error';
       else if (last.type === 'run_aborted') status = 'aborted';
     }
-    summaries.push({ runId: meta.runId, projectId: meta.projectId, prompt: meta.prompt, createdAt: meta.createdAt, status });
+    summaries.push({
+      runId: meta.runId,
+      projectId: meta.projectId,
+      prompt: meta.prompt,
+      createdAt: meta.createdAt,
+      status,
+      ...(meta.threadId ? { threadId: meta.threadId } : {}),
+      ...(meta.turnId ? { turnId: meta.turnId } : {}),
+    });
   }
   summaries.sort((a, b) => b.createdAt - a.createdAt);
   return summaries.slice(0, limit);

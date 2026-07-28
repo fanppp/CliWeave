@@ -53,6 +53,21 @@ import {
   recordRunStart,
 } from '../agents/graph/graph-run-store.js';
 import {
+  createThread,
+  readThread,
+  listThreads,
+  trashThread,
+  readThreadEvents,
+  openTurn,
+  completeTurn,
+  failTurn,
+  abortPendingTurn,
+  writePendingRun,
+  readPendingRun,
+  deletePendingRun,
+  ThreadConflictError,
+} from '../agents/thread/thread-store.js';
+import {
   GraphV3Schema,
   GraphValidationError,
   readProjectGraph,
@@ -69,9 +84,6 @@ import type { SocketManager } from '../infrastructure/websocket/SocketManager.js
 export interface ProjectsRouteOptions {
   socketManager: SocketManager;
 }
-
-/** 项目图运行的待启动 prompt（runId → {prompt, projectId}），start 时取走。 */
-const pendingPrompts = new Map<string, { prompt: string; projectId: string; createdAt: number }>();
 
 function readText(path: string): string | undefined {
   try {
@@ -595,29 +607,90 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
   // ── 图运行 ───────────────────────────────────────────────────
   app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/run', async (request, reply) => {
     const { projectId } = request.params;
-    const body = (request.body ?? {}) as { prompt?: unknown };
-    const prompt = typeof body.prompt === 'string' ? body.prompt : '';
-    if (prompt.trim().length === 0) return reply.code(400).send({ error: 'prompt is required' });
+    const body = (request.body ?? {}) as {
+      message?: unknown;
+      prompt?: unknown; // 兼容旧前端 {prompt}
+      threadId?: unknown;
+      expectedThreadRevision?: unknown;
+    };
+    const message =
+      typeof body.message === 'string' ? body.message : typeof body.prompt === 'string' ? body.prompt : '';
+    if (message.trim().length === 0) return reply.code(400).send({ error: 'message is required' });
     try {
       readProjectMeta(projectId);
     } catch (err) {
       return reply.code(404).send({ error: (err as Error).message });
     }
+
+    // 解析/创建 Thread（新对话省略 threadId；继续对话须 threadId + expectedThreadRevision）
+    let threadId: string;
+    let expectedRevision: number;
+    const bodyThreadId = typeof body.threadId === 'string' ? body.threadId.trim() : '';
+    if (bodyThreadId) {
+      const thread = readThread(projectId, bodyThreadId);
+      if (!thread) return reply.code(404).send({ error: 'thread not found' });
+      threadId = thread.id;
+      if (typeof body.expectedThreadRevision !== 'number' || !Number.isInteger(body.expectedThreadRevision)) {
+        return reply.code(400).send({ error: 'expectedThreadRevision is required to continue a thread' });
+      }
+      expectedRevision = body.expectedThreadRevision;
+    } else {
+      threadId = createThread(projectId, message.slice(0, 40).trim() || '新对话').id;
+      expectedRevision = 0;
+    }
+
     const runId = crypto.randomUUID();
-    pendingPrompts.set(runId, { prompt, projectId, createdAt: Date.now() });
-    registerRun({ id: runId, projectId, kind: 'graph', status: 'pending', createdAt: Date.now() });
-    return reply.code(202).send({ status: 'created', runId });
+    try {
+      const turn = await openTurn(projectId, threadId, expectedRevision, { runId, userMessage: message });
+      // 持久化 pending run（create↔start 之间重启不丢 user turn）
+      writePendingRun({
+        runId,
+        projectId,
+        threadId,
+        turnId: turn.turnId,
+        prompt: message,
+        threadRevision: turn.revision,
+        createdAt: Date.now(),
+      });
+      registerRun({
+        id: runId,
+        projectId,
+        kind: 'graph',
+        status: 'pending',
+        createdAt: Date.now(),
+        threadId,
+        turnId: turn.turnId,
+      });
+      return reply.code(202).send({ status: 'created', runId, threadId, turnId: turn.turnId });
+    } catch (err) {
+      if (err instanceof ThreadConflictError) return reply.code(409).send({ error: err.message });
+      throw err;
+    }
   });
 
   app.post<{ Params: { projectId: string; runId: string } }>(
     '/api/projects/:projectId/run/:runId/start',
     async (request, reply) => {
       const { projectId, runId } = request.params;
+      // pending run 落盘（重启不丢）；优先于内存 registry
+      const pending = readPendingRun(projectId, runId);
+      if (!pending || pending.projectId !== projectId) {
+        return reply.code(404).send({ error: 'run prompt not found' });
+      }
       const entry = getRun(runId);
-      if (!entry || entry.projectId !== projectId) return reply.code(404).send({ error: 'run not found in this project' });
-      if (entry.status !== 'pending') return reply.code(409).send({ error: 'run already started' });
-      const pending = pendingPrompts.get(runId);
-      if (!pending || pending.projectId !== projectId) return reply.code(404).send({ error: 'run prompt not found' });
+      if (entry && entry.status !== 'pending') return reply.code(409).send({ error: 'run already started' });
+      // 重启后 registry 可能丢失 entry：按 pending 重建
+      if (!entry) {
+        registerRun({
+          id: runId,
+          projectId,
+          kind: 'graph',
+          status: 'pending',
+          createdAt: pending.createdAt,
+          threadId: pending.threadId,
+          turnId: pending.turnId,
+        });
+      }
 
       let graph: Graph;
       try {
@@ -627,18 +700,28 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
       } catch (err) {
         transitionRunStatus(runId, 'error');
         removeRun(runId);
-        pendingPrompts.delete(runId);
+        deletePendingRun(projectId, runId);
+        if (pending.threadId && pending.turnId) {
+          await failTurn(projectId, pending.threadId, runId, pending.turnId, { status: 'error', reason: 'graph not runnable' });
+        }
         const msg = err instanceof Error ? err.message : 'graph not runnable';
         socketManager.broadcastGraph({ type: 'run_error', runId, error: msg });
         return reply.code(400).send({ error: msg });
       }
 
-      const prompt = pending.prompt;
-      pendingPrompts.delete(runId);
+      const { prompt, threadId, turnId, threadRevision } = pending;
+      deletePendingRun(projectId, runId);
       transitionRunStatus(runId, 'running');
       const controller = registerAbort(runId);
-      entry.controller = controller;
-      recordRunStart(projectId, runId, prompt, graph);
+      const regEntry = getRun(runId);
+      if (regEntry) regEntry.controller = controller;
+      recordRunStart(
+        projectId,
+        runId,
+        prompt,
+        graph,
+        threadId ? { threadId, turnId, threadRevision } : undefined,
+      );
       reply.code(202).send({ status: 'started', runId });
 
       setImmediate(() => {
@@ -647,10 +730,26 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
           projectId,
           emit: (event) => {
             socketManager.broadcastGraph(event);
-            // 终态由事件决定（finally 只清理，不得覆盖 done/error/aborted）
-            if (event.type === 'run_done') transitionRunStatus(runId, 'done');
-            else if (event.type === 'run_error') transitionRunStatus(runId, 'error');
-            else if (event.type === 'run_aborted') transitionRunStatus(runId, 'aborted');
+            // 终态由事件决定（finally 只清理，不得覆盖 done/error/aborted）+ Thread turn 生命周期
+            if (event.type === 'run_done') {
+              transitionRunStatus(runId, 'done');
+              if (threadId && turnId) {
+                void completeTurn(projectId, threadId, runId, turnId, {
+                  finalArtifact: event.finalText,
+                  quality: {
+                    status: 'done',
+                    termination: event.termination,
+                    ...(event.reason ? { reason: event.reason } : {}),
+                  },
+                });
+              }
+            } else if (event.type === 'run_error') {
+              transitionRunStatus(runId, 'error');
+              if (threadId && turnId) void failTurn(projectId, threadId, runId, turnId, { status: 'error', reason: event.error });
+            } else if (event.type === 'run_aborted') {
+              transitionRunStatus(runId, 'aborted');
+              if (threadId && turnId) void failTurn(projectId, threadId, runId, turnId, { status: 'aborted' });
+            }
           },
           record: (event) => {
             recordRunEvent(projectId, runId, event);
@@ -661,6 +760,7 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
             const msg = `graph execution crashed: ${(err as Error).message}`;
             socketManager.broadcastGraph({ type: 'run_error', runId, error: msg });
             transitionRunStatus(runId, 'error');
+            if (threadId && turnId) void failTurn(projectId, threadId, runId, turnId, { status: 'error', reason: msg });
           })
           .finally(() => {
             unregisterAbort(runId);
@@ -675,9 +775,69 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
     async (request, reply) => {
       const { projectId, runId } = request.params;
       const entry = getRun(runId);
-      if (!entry || entry.projectId !== projectId) return reply.code(404).send({ error: 'run not found in this project' });
+      // pending（未 start）：清 activeRunId + turn_failed aborted + 删 pending
+      if (entry && entry.projectId === projectId && entry.status === 'pending') {
+        if (entry.threadId && entry.turnId) await abortPendingTurn(projectId, entry.threadId, runId, entry.turnId);
+        deletePendingRun(projectId, runId);
+        transitionRunStatus(runId, 'aborted');
+        removeRun(runId);
+        socketManager.broadcastGraph({ type: 'run_aborted', runId });
+        return reply.code(202).send({ status: 'aborted', runId });
+      }
+      // 重启后 entry 丢失但 pending 文件在：按 pending abort
+      if (!entry) {
+        const pending = readPendingRun(projectId, runId);
+        if (pending && pending.threadId && pending.turnId) {
+          await abortPendingTurn(projectId, pending.threadId, runId, pending.turnId);
+          deletePendingRun(projectId, runId);
+          return reply.code(202).send({ status: 'aborted', runId });
+        }
+        return reply.code(404).send({ error: 'run not found in this project' });
+      }
+      if (entry.projectId !== projectId) return reply.code(404).send({ error: 'run not found in this project' });
+      // running：abort controller；emit 回调发 run_aborted → failTurn
       const ok = abortRunEntry(runId) || abortRun(runId);
       return reply.code(ok ? 202 : 404).send({ status: ok ? 'aborted' : 'not_found', runId });
+    },
+  );
+
+  // ── Thread（跨轮对话）──────────────────────────────────────
+  app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/threads', async (request) => {
+    return { threads: listThreads(request.params.projectId) };
+  });
+
+  app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/threads', async (request, reply) => {
+    const { projectId } = request.params;
+    const { title } = (request.body ?? {}) as { title?: unknown };
+    try {
+      readProjectMeta(projectId);
+    } catch (err) {
+      return reply.code(404).send({ error: (err as Error).message });
+    }
+    const thread = createThread(projectId, typeof title === 'string' ? title : '新对话');
+    return reply.code(201).send(thread);
+  });
+
+  app.get<{ Params: { projectId: string; threadId: string } }>(
+    '/api/projects/:projectId/threads/:threadId',
+    async (request, reply) => {
+      const { projectId, threadId } = request.params;
+      const thread = readThread(projectId, threadId);
+      if (!thread) return reply.code(404).send({ error: 'thread not found' });
+      return { thread, events: readThreadEvents(projectId, threadId) };
+    },
+  );
+
+  app.delete<{ Params: { projectId: string; threadId: string } }>(
+    '/api/projects/:projectId/threads/:threadId',
+    async (request, reply) => {
+      const { projectId, threadId } = request.params;
+      try {
+        trashThread(projectId, threadId);
+        return reply.send({ status: 'ok', threadId });
+      } catch (err) {
+        return reply.code(404).send({ error: (err as Error).message });
+      }
     },
   );
 
