@@ -91,8 +91,9 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
     const name = typeof body.name === 'string' ? body.name.trim() : '';
     const path = typeof body.path === 'string' ? body.path.trim() : '';
     if (!name) return reply.code(400).send({ error: 'name is required' });
+    // path 留空 → 与 default 同路径（CliWeave 根）
     try {
-      const meta = createProject(name, path);
+      const meta = createProject(name, path || undefined);
       return reply.code(201).send(meta);
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });

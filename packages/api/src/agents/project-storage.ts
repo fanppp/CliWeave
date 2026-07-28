@@ -161,14 +161,20 @@ function writeProjectLocalAtomic(id: string, local: ProjectLocal): void {
   renameSync(tmp, f);
 }
 
-export function createProject(name: string, path: string, id?: string): ProjectMeta {
-  const pid = id ?? generateProjectId();
-  ProjectIdSchema.parse(pid);
+export function createProject(name: string, path: string | undefined): ProjectMeta {
+  const trimmedName = name.trim();
+  if (!trimmedName) throw new Error('project name is required');
+  // name 同时作 projectId + 文件夹名（agents/projects/<name>/，default 的兄弟），
+  // 须是小写 slug（无中文/大写/空格/点），否则不能做目录名/URL 段。
+  ProjectIdSchema.parse(trimmedName);
+  if (trimmedName === DEFAULT_PROJECT_ID) throw new Error(`project name '${trimmedName}' is reserved`);
+  const pid = trimmedName;
   if (existsSync(projectDir(pid))) throw new Error(`project already exists: ${pid}`);
-  const realPath = validateProjectPath(path);
+  // path 留空 → 与 default 同路径（CliWeave 根）；提供则须存在
+  const realPath = path && path.trim() ? validateProjectPath(path) : getProjectRoot();
   mkdirSync(projectNodesDir(pid), { recursive: true });
   mkdirSync(projectRunsDir(pid), { recursive: true });
-  const meta: ProjectMeta = { schemaVersion: 1, id: pid, name: name.trim(), createdAt: Date.now() };
+  const meta: ProjectMeta = { schemaVersion: 1, id: pid, name: trimmedName, createdAt: Date.now() };
   writeProjectMetaAtomic(pid, meta);
   writeProjectLocalAtomic(pid, { path: realPath });
   return meta;

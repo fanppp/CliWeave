@@ -29,6 +29,15 @@ interface AgentMeta {
   provider: string;
 }
 
+interface ProviderMeta {
+  id: string;
+  name: string;
+  command: string;
+  memoryHome: string;
+  defaultModel?: string;
+  installed: boolean;
+}
+
 interface NodeData {
   label: string;
   kind: 'input' | 'agent' | 'end';
@@ -183,11 +192,15 @@ export function GraphCanvas() {
   const setSelectedAgentNodeKey = useGraphRunStore((s) => s.setSelectedAgentNodeKey);
 
   const [agents, setAgents] = useState<AgentMeta[]>([]);
+  const [providers, setProviders] = useState<ProviderMeta[]>([]);
   const agentNameMap = useMemo(() => new Map(agents.map((a) => [a.nodeKey, a.name] as const)), [agents]);
   const [nodes, setNodes, onNodesChange] = useNodesState(toFlowNodes(graph, agentNameMap));
   const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>([]);
   const [picker, setPicker] = useState(false);
   const [selEdge, setSelEdge] = useState<FlowEdge | null>(null);
+  const [createForm, setCreateForm] = useState({ provider: '', localId: '', name: '', identity: '' });
+  const [createErr, setCreateErr] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
   const skipCommit = useRef(true);
   const dirtyRef = useRef(false);
 
@@ -207,10 +220,57 @@ export function GraphCanvas() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graph, agentNameMap]);
 
-  // 拉该画布的节点实例列表（供"+加入节点"）
+  // 拉该画布的节点实例列表（供"+加入节点"快速加入已有实例）
   useEffect(() => {
     fetch(`${API_URL}/api/projects/${projectId}/nodes`).then((r) => (r.ok ? r.json() : { nodes: [] })).then((data: { nodes: AgentMeta[] }) => setAgents(Array.isArray(data.nodes) ? data.nodes : [])).catch(() => setAgents([]));
   }, [projectId]);
+
+  // 拉可用 provider 列表（供"+加入节点"创建新实例）
+  useEffect(() => {
+    fetch(`${API_URL}/api/agents/providers`).then((r) => (r.ok ? r.json() : [])).then((list: ProviderMeta[]) => {
+      const arr = Array.isArray(list) ? list : [];
+      setProviders(arr);
+      setCreateForm((f) => (f.provider ? f : { ...f, provider: arr.find((p) => p.installed !== false)?.id ?? arr[0]?.id ?? '' }));
+    }).catch(() => setProviders([]));
+  }, []);
+
+  /** 原子创建节点实例 + 加入图（POST /graph/nodes）。失败显示错误，不污染画布。 */
+  const createNode = useCallback(async (): Promise<void> => {
+    const { provider, localId, name, identity } = createForm;
+    if (!provider || !localId.trim()) {
+      setCreateErr('provider 和 localId 必填');
+      return;
+    }
+    setCreateErr(null);
+    setCreating(true);
+    try {
+      const graphNodeId = `n${Date.now().toString(36)}`;
+      const idx = nodes.length;
+      const res = await fetch(`${API_URL}/api/projects/${projectId}/graph/nodes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider,
+          localId: localId.trim(),
+          name: (name.trim() || localId.trim()),
+          ...(identity.trim() ? { identity: identity.trim() } : {}),
+          graphNodeId,
+          position: { x: 320, y: 80 + idx * 140 },
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? `创建失败 HTTP ${res.status}`);
+      }
+      setCreateForm({ provider, localId: '', name: '', identity: '' });
+      setPicker(false);
+      await loadProjectGraph(); // 刷新图（含新节点）
+    } catch (e) {
+      setCreateErr((e as Error).message);
+    } finally {
+      setCreating(false);
+    }
+  }, [createForm, nodes.length, projectId, loadProjectGraph]);
 
   const commit = useCallback((ns: Node[], es: FlowEdge[]) => {
     if (skipCommit.current) return;
@@ -255,11 +315,18 @@ export function GraphCanvas() {
   }, [setSelectedGraphNodeId, setSelectedAgentNodeKey, setNodes, setEdges]);
 
   const deleteSelected = useCallback(() => {
-    setNodes((ns) => ns.filter((n) => !(n.selected && (n.data as unknown as NodeData).kind !== 'input' && (n.data as unknown as NodeData).kind !== 'end')));
+    // 选中来源：ReactFlow n.selected 或 app-state selectedGraphNodeId（兜底，防 click 微拖拽丢选中）
+    const isTarget = (n: Node): boolean =>
+      (n.selected || n.id === selectedGraphNodeId) &&
+      (n.data as unknown as NodeData).kind !== 'input' &&
+      (n.data as unknown as NodeData).kind !== 'end';
+    setNodes((ns) => ns.filter((n) => !isTarget(n)));
     setEdges((es) => es.filter((e) => !e.selected));
     setSelEdge(null);
+    setSelectedGraphNodeId(null);
+    setSelectedAgentNodeKey(null);
     dirtyRef.current = true;
-  }, [setNodes, setEdges]);
+  }, [setNodes, setEdges, selectedGraphNodeId, setSelectedGraphNodeId, setSelectedAgentNodeKey]);
 
   const onEdgeClick = useCallback((_: unknown, edge: Edge) => {
     setSelEdge(edge as FlowEdge);
@@ -324,15 +391,30 @@ export function GraphCanvas() {
       {saveError && <div style={styles.errBanner} title={saveError}>⚠ {saveError}</div>}
       {picker && (
         <div style={styles.picker}>
-          {agents.length === 0 && <div style={styles.pickerEmpty}>没有可用 agent 节点</div>}
-          {agents.map((a) => {
-            const inGraph = graphNodes.some((n) => n.type === 'agent' && n.agentNodeKey === a.nodeKey);
-            return (
-              <button key={a.nodeKey} style={{ ...styles.agentBtn, ...(inGraph ? styles.agentBtnDisabled : {}) }} disabled={inGraph} onClick={() => addAgentNode(a)} title={inGraph ? '已在图中' : `加入 ${a.nodeKey}`}>
-                <strong>{a.provider}</strong> · {a.name}{inGraph && <span> ✓</span>}
-              </button>
-            );
-          })}
+          {/* 创建新节点实例（原子：建实例+加入图） */}
+          <div style={styles.pickerSection}>创建新节点</div>
+          <select className='nodrag' style={styles.pickerSelect} value={createForm.provider} onChange={(e) => setCreateForm((f) => ({ ...f, provider: e.target.value }))}>
+            {providers.map((p) => (
+              <option key={p.id} value={p.id} disabled={p.installed === false}>{p.name}{p.installed === false ? '（未安装）' : ''}</option>
+            ))}
+          </select>
+          <input className='nodrag' style={styles.pickerInput} placeholder='localId（如 coder2，小写英文/数字/_/-）' value={createForm.localId} onChange={(e) => setCreateForm((f) => ({ ...f, localId: e.target.value }))} />
+          <input className='nodrag' style={styles.pickerInput} placeholder='显示名（留空用 localId）' value={createForm.name} onChange={(e) => setCreateForm((f) => ({ ...f, name: e.target.value }))} />
+          <textarea className='nodrag' style={styles.pickerArea} placeholder='identity（可选，留空用默认）' rows={2} value={createForm.identity} onChange={(e) => setCreateForm((f) => ({ ...f, identity: e.target.value }))} />
+          {createErr && <div style={styles.pickerErr}>{createErr}</div>}
+          <button className='nodrag' style={{ ...styles.btn, opacity: creating ? 0.6 : 1 }} disabled={creating} onClick={() => void createNode()}>{creating ? '创建中…' : '创建并加入图'}</button>
+
+          {/* 已有实例（未在图中）快速加入 */}
+          {agents.filter((a) => !graphNodes.some((n) => n.type === 'agent' && n.agentNodeKey === a.nodeKey)).length > 0 && (
+            <>
+              <div style={{ ...styles.pickerSection, marginTop: 6 }}>已有实例（加入图）</div>
+              {agents.filter((a) => !graphNodes.some((n) => n.type === 'agent' && n.agentNodeKey === a.nodeKey)).map((a) => (
+                <button key={a.nodeKey} style={styles.agentBtn} onClick={() => addAgentNode(a)} title={`加入 ${a.nodeKey}`}>
+                  <strong>{a.provider}</strong> · {a.name}
+                </button>
+              ))}
+            </>
+          )}
         </div>
       )}
       {selEdge && (
@@ -395,6 +477,11 @@ const styles: Record<string, CSSProperties> = {
   errBanner: { background: 'var(--bubble-system)', color: 'var(--danger)', fontSize: 12, padding: '6px 12px', borderBottom: '1px solid var(--border)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   picker: { position: 'absolute', top: 44, left: 12, zIndex: 10, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: 8, display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 260, overflowY: 'auto', minWidth: 220 },
   pickerEmpty: { color: 'var(--text-faint)', fontSize: 12, padding: 8 },
+  pickerSection: { fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', marginTop: 4 },
+  pickerSelect: { background: 'var(--surface-raised)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 4, padding: '5px 6px', fontSize: 12 },
+  pickerInput: { background: 'var(--background)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 4, padding: '5px 6px', fontSize: 12 },
+  pickerArea: { width: '100%', resize: 'vertical', background: 'var(--background)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 4, padding: '5px 6px', fontSize: 12, fontFamily: 'inherit', boxSizing: 'border-box' },
+  pickerErr: { color: 'var(--danger)', fontSize: 11 },
   agentBtn: { textAlign: 'left', background: 'var(--surface-raised)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6, padding: '8px 10px', fontSize: 12, cursor: 'pointer' },
   agentBtnDisabled: { opacity: 0.4, cursor: 'not-allowed' },
   edgePanel: { position: 'absolute', top: 44, right: 12, zIndex: 10, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: 10, display: 'flex', flexDirection: 'column', gap: 8, minWidth: 220 },
@@ -407,7 +494,7 @@ const styles: Record<string, CSSProperties> = {
   inputErr: { color: 'var(--danger)', fontSize: 11 },
   inputBtn: { background: 'var(--accent)', color: 'var(--accent-text)', border: 'none', borderRadius: 4, padding: '6px 10px', fontSize: 13, cursor: 'pointer' },
   inputHint: { fontSize: 10, color: 'var(--text-faint)' },
-  agentNode: { width: 170, padding: 8, borderRadius: 8, color: '#e6e6e6', cursor: 'pointer', border: '1px solid var(--border)' },
+  agentNode: { width: 170, padding: 8, borderRadius: 8, color: '#e6e6e6', cursor: 'default', border: '1px solid var(--border)' },
   agentHead: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, gap: 4 },
   badge: { fontSize: 10, background: 'var(--success)', color: '#001', padding: '1px 6px', borderRadius: 8, fontWeight: 700 },
   iterBadge: { fontSize: 9, background: 'var(--accent)', color: '#fff', padding: '1px 5px', borderRadius: 8 },

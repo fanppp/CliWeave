@@ -20,14 +20,24 @@ export function ProjectPicker() {
   }, [loadProjects]);
 
   const submit = async (): Promise<void> => {
-    if (!name.trim() || !path.trim()) {
-      setErr('名称和路径都必填');
+    const n = name.trim();
+    if (!n) {
+      setErr('名称必填');
+      return;
+    }
+    if (!/^[a-z0-9][a-z0-9_-]{1,40}$/.test(n)) {
+      setErr('名称须为小写 slug（a-z 0-9 _ -，2-41 字符，不能中文/大写/空格），作画布文件夹名');
+      return;
+    }
+    if (n === 'default') {
+      setErr('名称 default 为保留名，换一个');
       return;
     }
     setErr(null);
     setBusy(true);
     try {
-      await createProject(name.trim(), path.trim());
+      // path 留空 → 后端用 default 同路径（CliWeave 根）；画布文件夹固定在 agents/projects/<name>/
+      await createProject(n, path.trim());
       setName('');
       setPath('');
       setOpen(false);
@@ -56,12 +66,12 @@ export function ProjectPicker() {
       {open && (
         <div style={styles.dialog}>
           <div style={styles.row}>
-            <label style={styles.label}>名称</label>
-            <input style={styles.input} value={name} onChange={(e) => setName(e.target.value)} placeholder='如：我的后端服务' />
+            <label style={styles.label}>画布名（作文件夹名：agents/projects/&lt;名&gt;/，小写 slug）</label>
+            <input style={styles.input} value={name} onChange={(e) => setName(e.target.value)} placeholder='如：my-backend' />
           </div>
           <div style={styles.row}>
-            <label style={styles.label}>项目路径</label>
-            <input style={styles.input} value={path} onChange={(e) => setPath(e.target.value)} placeholder='如：D:/code/my-service（须存在）' />
+            <label style={styles.label}>绑定项目路径（可选；agent 工作目录 cwd；留空=CliWeave 根）</label>
+            <input style={styles.input} value={path} onChange={(e) => setPath(e.target.value)} placeholder='如：D:/code/my-service（须存在；留空用 CliWeave 根）' />
           </div>
           {err && <div style={styles.err}>{err}</div>}
           <div style={styles.actions}>

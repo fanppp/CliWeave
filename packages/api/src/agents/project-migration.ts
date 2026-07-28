@@ -235,7 +235,7 @@ export function migrateProjectScoped(): MigrationResult {
     }
   }
   // 5. project meta + local
-  writeFileSync(join(staging, 'project.json'), JSON.stringify({ schemaVersion: 1, id: DEFAULT_PROJECT_ID, name: '默认', createdAt: Date.now() }, null, 2) + '\n', 'utf-8');
+  writeFileSync(join(staging, 'project.json'), JSON.stringify({ schemaVersion: 1, id: DEFAULT_PROJECT_ID, name: 'default', createdAt: Date.now() }, null, 2) + '\n', 'utf-8');
   writeFileSync(join(staging, 'project.local.json'), JSON.stringify({ path: getProjectRoot() }, null, 2) + '\n', 'utf-8');
 
   // 6. 验证 staging（逐节点 readNodeInstanceAt + 图）

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useChatStore } from '../stores/chatStore';
+import { useGraphRunStore } from '../stores/graphRunStore';
 
 interface NodeDetail {
   nodeKey: string;
@@ -12,16 +13,9 @@ interface NodeDetail {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3004';
 
-function ruleDir(file: string): string {
+function ruleBaseName(file: string): string {
   const idx = Math.max(file.lastIndexOf('/'), file.lastIndexOf('\\'));
-  return idx >= 0 ? file.slice(0, idx + 1) : '';
-}
-
-function deriveRuleDir(nodeKey: string): string {
-  const sep = nodeKey.indexOf(':');
-  const provider = sep > 0 ? nodeKey.slice(0, sep) : nodeKey;
-  const localId = sep > 0 ? nodeKey.slice(sep + 1) : '';
-  return `agents/${provider}/${localId}/config/rules/`;
+  return idx >= 0 ? file.slice(idx + 1) : file;
 }
 
 interface EditorProps {
@@ -98,6 +92,7 @@ function FileEditor({ title, hint, initial, save }: EditorProps) {
 
 export function NodeConfigPanel({ nodeKey: nodeKeyProp }: { nodeKey?: string } = {}) {
   const activeNodeId = useChatStore((s) => s.activeNodeId);
+  const projectId = useGraphRunStore((s) => s.projectId);
   const nodeKey = nodeKeyProp ?? activeNodeId;
   const [detail, setDetail] = useState<NodeDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -105,18 +100,20 @@ export function NodeConfigPanel({ nodeKey: nodeKeyProp }: { nodeKey?: string } =
   const [newName, setNewName] = useState('');
   const [createError, setCreateError] = useState<string | null>(null);
 
+  const nodeUrl = `${API_URL}/api/projects/${projectId}/nodes/${encodeURIComponent(nodeKey)}`;
+
   useEffect(() => {
     setLoading(true);
-    fetch(`${API_URL}/api/agents/${encodeURIComponent(nodeKey)}`)
+    fetch(nodeUrl)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => { setDetail(d); setLoading(false); })
       .catch(() => { setDetail(null); setLoading(false); });
-  }, [nodeKey, reloadKey]);
+  }, [nodeUrl, reloadKey]);
 
   const reload = (): void => setReloadKey((k) => k + 1);
 
   const saveIdentity = async (content: string): Promise<boolean> => {
-    const r = await fetch(`${API_URL}/api/agents/${encodeURIComponent(nodeKey)}/identity`, {
+    const r = await fetch(`${nodeUrl}/identity`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content }),
     });
@@ -125,7 +122,7 @@ export function NodeConfigPanel({ nodeKey: nodeKeyProp }: { nodeKey?: string } =
   };
 
   const saveRule = (file: string) => async (content: string): Promise<boolean> => {
-    const r = await fetch(`${API_URL}/api/agents/${encodeURIComponent(nodeKey)}/rules`, {
+    const r = await fetch(`${nodeUrl}/rules`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ file, content }),
     });
@@ -139,11 +136,9 @@ export function NodeConfigPanel({ nodeKey: nodeKeyProp }: { nodeKey?: string } =
       setCreateError('文件名需形如 coding.md，仅字母数字 . _ -');
       return;
     }
-    const dir = detail && detail.rules.length > 0
-      ? ruleDir(detail.rules[0].file)
-      : deriveRuleDir(nodeKey);
-    const file = `${dir}${name}`;
-    const r = await fetch(`${API_URL}/api/agents/${encodeURIComponent(nodeKey)}/rules`, {
+    // file 为相对 nodeDir 的 tail（projects 路由按此解析 + 校验在 config/rules 内）
+    const file = `config/rules/${name}`;
+    const r = await fetch(`${nodeUrl}/rules`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ file, content: `# ${name.replace(/\.md$/, '')} 规则\n\n` }),
     });
@@ -175,7 +170,7 @@ export function NodeConfigPanel({ nodeKey: nodeKeyProp }: { nodeKey?: string } =
         <div style={styles.empty}>(无规则文件，可在下方新建)</div>
       ) : (
         detail.rules.map((r) => {
-          const name = r.file.split(/[\\/]/).pop() ?? r.file;
+          const name = ruleBaseName(r.file);
           return (
             <FileEditor
               key={`${nodeKey}:${r.file}`}
