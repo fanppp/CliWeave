@@ -133,3 +133,62 @@
 1. 勾选上方对应 checkbox（`[ ]` → `[x]`）
 2. 在"已完成"区追加一行：`- [日期] 任务号 - 简述`
 3. 更新该 Phase 的"状态"行
+
+---
+
+## 画布多轮对话 / 智能终止 / 指定节点入口（M6+，2026-07-28 起）
+
+**目标**：统一为四层运行模型 `Project → Thread（跨轮记忆）→ Run（不可变图执行）→ NodeInvocation（一次 CLI 调用，run-scoped session）`。回答三个核心问题：
+
+1. **Q1**：首节点能答就不必跑后续（智能终止）。
+2. **Q2**：多轮记忆如何处理、每个 CLI 是否要带上一轮结果。
+3. **Q3**：可否直接从某节点开始。
+
+### 八步计划与状态
+
+| Step | 内容 | 状态 | commit |
+|------|------|------|--------|
+| **1** | Session 基座（切断 graph↔active-session + `session_fallback` 协议 + node-mode WS/路由全迁 project-aware） | ✅ 完成 | `3650b52` |
+| **2** | Thread 基座（append-only events + revision lock + pending run 持久化 + CRUD） | ✅ 完成 | `4f9ec5e` |
+| **3** | ContextBuilder（Thread 跨轮记忆注入 + serverContext + 12k 预算裁剪 + untrusted 包裹） | ✅ 完成 | `6ae6016` |
+| **4a** | V4 Harness 核心（V4 schema/edge kind、rubric、evaluation、`walkEvaluatorOptimizerGraph`、事件源 run 历史；V3/V4 **双 runner**，存量 V3 不自动转 V4） | ❌ 未开始 | — |
+| **4b** | 智能终止（CompletionClaim + Evaluation `disposition` + branch 早结束 + `route_decided`/`branch_done`）= **Q1** | ❌ 未开始 | — |
+| **5** | RunEntry（`{kind:'work',mode:'downstream'\|'node_only'}` + validateRunEntry + 历史 artifact 校验）= **Q3** | ❌ 未开始 | — |
+| **6** | Durable pause（ask_user checkpoint/resume） | ❌ 未开始 | — |
+| **7** | 前端（Thread 选择器 + 新对话/继续对话 + 节点入口菜单 + route decision 展示） | ❌ 未开始 | — |
+| **8** | 增强（可配置摘要生成器、语义检索、可审长期 memory） | ❌ 未开始 | — |
+
+### 三问状态
+
+- **Q2 多轮记忆**：✅ **后端完成**（Step 2+3）。Thread 事件源（`turn_opened`/`turn_completed`/`memory_pinned`）+ ContextBuilder 把"最近 8 轮 Q&A + summary + pins + serverContext"前置注入每个节点 prompt，历史 `[untrusted data]` 包裹防注入、超预算裁最旧；永不裁 system/当前消息/上游 payload。每个 work 节点 fresh 跑（不 resume CLI），靠构造 prompt 携带跨轮记忆。
+- **Q1 智能终止**：❌ 未动（Step 4b）。
+- **Q3 从节点开始**：❌ 未动（Step 5）。注：Step 1B 新增的 `POST /api/projects/:pid/nodes` 是创建节点**实例**（node 模式用），不是"从某节点发起 run"。
+
+### 关键设计决策（已锁定）
+
+- **Session**：provider 在 resume 不可用且**无实质输出**时发 `session_fallback` 诊断并内部 fresh 重试（用 `${invocationId}:fb` 独立审计）；Router 只观察、不自重试（防双执行）。图运行永不传 `active` → 不触碰 `active-session.json`。
+- **WS**：`NodeMessageEnvelope{instanceKey,message}` + `join_node(ack)` + 按 instanceKey 过滤（防 projA/projB 同 nodeKey 串台）；`joinedInstanceKey===activeInstanceKey` 才发。
+- **切换仲裁**：`projectStore` 统一仲裁（`chatBusy || graph starting/running`），忙则整个切换失败；`chatStore.setProjectId` 一旦调用无条件原子重置 + 项目级 active-node localStorage key。
+- **Thread**：`events.jsonl` 事实源（append-only）+ `thread.json` 可变（revision+activeRunId）；revision lock（continue 须传 `expectedThreadRevision`，不匹配→409）；同 Thread 单 active run→409；pending run 落盘（create↔start 之间重启不丢）。
+- **ContextBuilder**：首版纯 raw turns 回退（summary 留空到 Step 8）；char/4 token 估算；serverContext 的 location 由调用方提供（不推断），缺失则省略（首版不 block，ask_user 在 Step 6）。
+- **V3/V4 双 runner**（撤销"读时归一化 V4"）：`schemaVersion===3→walkLegacyGraph`，`===4→walkEvaluatorOptimizerGraph`；V3→V4 提供显式迁移向导（后续），不在读取时自动重写语义。
+
+### 已完成细节（commit 内）
+
+- **Step 1**：`session-policy.ts`（SessionPolicy/NodeOutcome）+ `invoke-agent.ts`（统一 helper，`onMessage:AgentMessage`，graph 与单节点共用）+ `AgentRouter` 薄壳 runAgentNode/NodeExecContext/producerSessions；3 provider session_fallback+`:fb`（opencode 补完整回退）+ spawnFn 测试缝。测试：invoke-agent(7) + walk policy + active-session 文件级双断言(3) + codex session_fallback fake-spawn(2)。
+- **Step 2**：`thread/thread-store.ts`（createThread/readThread/listThreads/trashThread/openTurn/completeTurn/failTurn/abortPendingTurn/pinMemory/unpinMemory/pending run 读写）+ run-registry 加 threadId/turnId + RunMeta 加 threadId/turnId/threadRevision + `projects.ts` POST /run 收 `{message,threadId?,expectedThreadRevision?}` + /start 改读 pending 文件 + 终态回调 completeTurn/failTurn + Thread CRUD 路由。测试：thread-store(11)；运行时烟测：create→turn_opened→pending abort→turn_failed→continue→stale 409→active 409→重启恢复。
+- **Step 3**：`context-builder.ts`（buildThreadContext/buildServerContext）+ ExecuteOptions.contextPrefix + walkBranch 前置注入 + RunMeta.contextSnapshot + `projects.ts`/start 构造 serverContext+buildThreadContext→注入+快照入 run_meta + ProjectLocal.location?。测试：context-builder(8) + walk contextPrefix 前置(1)；运行时烟测：run_meta.contextSnapshot(policyVersion=1, serverContext.timezone=Asia/Shanghai)。
+
+**累计测试 72 过**（cli-storage + registries + active-session + invoke-agent + context-builder + thread-store + graph + agent-router + codex-session-fallback）；api+web typecheck 绿。
+
+### 重要提醒
+
+- Step 2/3 的**后端契约已完成并测试**，但**前端尚未接线**（`graphRunStore.startRun` 仍发 `{prompt}`、无 Thread 选择器/继续对话 UI、RunPicker 不按 thread 分组）。即从 web UI 还用不上多轮记忆——那是 **Step 7**。后端已可独立验证（curl + 测试）。
+- ContextBuilder 前缀当前注入**所有** agent 节点（含 decision/reviewer）；设计原指"每个 work 节点"，Step 4b 可细化。
+- 无前端设置 project `location` 的 UI（`ProjectLocal.location` 字段已就位，首版始终省略）。
+
+### 下一步建议
+
+- **Step 4a** V4 Harness 核心（为 Q1 智能终止 4b 铺路）。
+- 或先做 **Step 7 前端接线**让 Q2 多轮记忆在 UI 可用。
+
