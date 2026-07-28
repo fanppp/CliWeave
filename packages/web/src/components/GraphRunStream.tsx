@@ -24,6 +24,9 @@ function bubbleStyle(bubble: GraphBubble, graph: { nodes: GraphNode[] } | null):
   if (bubble.eventType === 'node_error' || bubble.eventType === 'run_error' || bubble.eventType === 'error') {
     return { bg: 'var(--bubble-system)', label: '错误' };
   }
+  if (bubble.eventType === 'gate_exhausted') {
+    return { bg: 'var(--bubble-system)', label: '预算耗尽' };
+  }
   if (bubble.eventType === 'tool_use') return { bg: 'var(--bubble-tool)', label: bubble.toolName ?? '工具' };
   return nodeMeta(bubble.nodeId, graph);
 }

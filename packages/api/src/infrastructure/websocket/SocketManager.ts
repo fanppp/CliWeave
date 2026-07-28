@@ -20,8 +20,19 @@ export type GraphEvent =
       type: 'run_done';
       runId: string;
       finalText: string;
-      termination: 'completed' | 'edge_limit' | 'global_limit';
+      /** completed=自然结束；best_effort=回边预算耗尽后 best-effort 放行（Phase1 新）；edge_limit=旧 V3 历史回放兼容；global_limit=全局执行上限。 */
+      termination: 'completed' | 'best_effort' | 'edge_limit' | 'global_limit';
       reason?: string;
+    }
+  | {
+      /** 回边预算耗尽：best-effort 放行（仍产出最后审核+producer artifact 作质量报告）。 */
+      type: 'gate_exhausted';
+      runId: string;
+      nodeId: string;
+      edgeId: string;
+      reason: string;
+      lastProducerArtifact: string;
+      reviewerFeedback: string | null;
     }
   | { type: 'run_aborted'; runId: string }
   | { type: 'run_error'; runId: string; error: string };

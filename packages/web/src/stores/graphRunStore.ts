@@ -34,10 +34,19 @@ export type GraphEvent =
   | { type: 'node_done'; runId: string; nodeId: string }
   | { type: 'node_error'; runId: string; nodeId: string; error: string }
   | {
+      type: 'gate_exhausted';
+      runId: string;
+      nodeId: string;
+      edgeId: string;
+      reason: string;
+      lastProducerArtifact: string;
+      reviewerFeedback: string | null;
+    }
+  | {
       type: 'run_done';
       runId: string;
       finalText: string;
-      termination: 'completed' | 'edge_limit' | 'global_limit';
+      termination: 'completed' | 'best_effort' | 'edge_limit' | 'global_limit';
       reason?: string;
     }
   | { type: 'run_aborted'; runId: string }
@@ -229,8 +238,24 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
           };
           return { ...s, bubbles: [...s.bubbles, bubble], activeNodeIds: removeActive(s.activeNodeIds, event.nodeId), status: 'error' };
         }
+        case 'gate_exhausted': {
+          const content = `⚠ 审核预算耗尽·best-effort 放行\n${event.reason}\n【最后产物】\n${event.lastProducerArtifact || '(无)'}${event.reviewerFeedback ? `\n【最后审核反馈】\n${event.reviewerFeedback}` : ''}`;
+          const bubble: GraphBubble = {
+            id: nextId(),
+            nodeId: event.nodeId,
+            role: 'system',
+            content,
+            eventType: 'gate_exhausted',
+            timestamp: Date.now(),
+          };
+          return { ...s, bubbles: [...s.bubbles, bubble] };
+        }
         case 'run_done': {
-          const label = event.termination === 'completed' ? '完成' : event.termination === 'edge_limit' ? '达到最大迭代，采用最后一版' : '达到全局执行上限';
+          const label =
+            event.termination === 'completed' ? '完成'
+            : event.termination === 'best_effort' ? '预算耗尽·best-effort 放行'
+            : event.termination === 'edge_limit' ? '达到最大迭代（legacy）'
+            : '达到全局执行上限';
           const bubble: GraphBubble = {
             id: nextId(),
             nodeId: '__run__',

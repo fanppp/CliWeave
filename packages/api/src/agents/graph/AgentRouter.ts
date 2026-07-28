@@ -7,7 +7,7 @@
  *
  * 终态（finish guard 各最多一次）：
  * - 到 endNode / 无前向边 → run_done(completed, finalText=各分支最后生产者产出拼接||最后完成输出)。
- * - 回边覆盖次数达 maxIterations（默认1）→ run_done(edge_limit, 最后生产者产出)；无生产者输出 → run_error。
+ * - 回边覆盖次数达 maxIterations（默认1）→ best-effort：发 gate_exhausted 后改走前向（不硬终止）；分支终态 best_effort 跟随至聚合。
  * - 决策点未取到 verdict → 当不满意（走回边，靠 maxIter 兜底）。
  */
 import { buildAgent, getActiveSessionCtx, setActiveSessionCtx } from '../AgentServiceFactory.js';
@@ -96,18 +96,32 @@ export async function runAgentNode(node: GraphAgentNode, nodePrompt: string, opt
   }
 }
 
-/** 构造 prompt：决策点要求输出 VERDICT；生产者重跑带上一版+上游反馈；紧接 input 用原始需求。 */
-function buildPrompt(node: GraphAgentNode, trail: TrailEntry[], input: string, isDecision: boolean): string {
-  const prev = trail.at(-1);
+/**
+ * 构造 prompt（V3 legacy runner）：稳定三分区，显式状态，不反查 trail。
+ * - decision：只读 lastProducerArtifact，不消费旧 review metadata（自己生成 metadata）。
+ * - producer rework（target===lastProducerNodeId）：【上游产物】=你的上一版 + 【审核元数据】→ 修改。
+ * - producer forward：【上游产物】+ 可选【审核元数据】→ 继续。
+ * 不变量：【上游产物】只含 producer artifact；reviewer 文本永不入此区；reviewer output 不成为 lastProducerArtifact。
+ */
+function buildLegacyPrompt(
+  _node: GraphAgentNode,
+  input: string,
+  lastProducerArtifact: string,
+  lastProducerNodeId: string | null,
+  latestReview: { approved: boolean; feedback: string } | null,
+  isDecision: boolean,
+): string {
   if (isDecision) {
-    return `【原始需求】${input}\n\n【待裁定内容】${prev?.output ?? '(无)'}\n\n请判定并在结尾输出一行 \`VERDICT: APPROVE\`（满意）或 \`VERDICT: REJECT\`（不满意），其后附反馈。`;
+    return `【原始需求】\n${input}\n\n【待裁定内容】\n${lastProducerArtifact || '(无)'}\n\n请判定并在结尾输出一行 \`VERDICT: APPROVE\`（满意）或 \`VERDICT: REJECT\`（不满意），其后附反馈。`;
   }
-  const lastSelf = [...trail].reverse().find((t) => t.nodeId === node.id);
-  if (lastSelf) {
-    const fb = prev?.verdict;
-    return `【原始需求】${input}\n\n【你的上一版】${lastSelf.output}\n\n【上游裁定】${fb ? (fb.approved ? 'APPROVE' : 'REJECT') : '(无)'}\n【上游反馈】${fb?.feedback ?? '(无)'}\n\n请基于反馈修改。`;
-  }
-  return input;
+  const artifactSection = `【上游产物】\n${lastProducerArtifact || '(无)'}`;
+  const reviewSection = latestReview
+    ? `\n\n【审核元数据】\nVERDICT: ${latestReview.approved ? 'APPROVE' : 'REJECT'}\n反馈: ${latestReview.feedback}`
+    : '';
+  const instruction = lastProducerNodeId === _node.id
+    ? '请基于审核反馈修改你的上一版。'
+    : '请基于上游产物继续。';
+  return `【原始需求】\n${input}\n\n${artifactSection}${reviewSection}\n\n${instruction}`;
 }
 
 /** 单路径条件游走（可注入 exec 用于测试）。input 可扇出多条前向出边 → 并行跑多个首层分支，各自产出后图结束（无汇合）。 */
@@ -154,22 +168,38 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
 
   type BranchResult =
     | { status: 'completed'; output: string }
-    | { status: 'edge_limit'; output: string; reason: string }
+    | { status: 'best_effort'; output: string; reason?: string }
     | { status: 'global_limit'; output: string }
     | { status: 'aborted' }
     | { status: 'error'; error: string };
 
-  /** 单路径分支游走：决策点解析 verdict→满意前向/不满意回边；回边 target 跑满 maxIter → edge_limit。 */
+  /**
+   * 单路径分支游走（V3 legacy）：显式状态 lastProducerArtifact/lastProducerNodeId/latestReview/bestEffortUsed。
+   * 决策点解析 verdict→满意前向/不满意回边；回边覆盖达 maxIter → best-effort（改走前向 + 发 gate_exhausted），不硬终止。
+   * producer 产出后清 review metadata（gap4）；bestEffortUsed 跟随分支，下游成功不抹掉 best-effort 事实（gap1）。
+   */
   async function walkBranch(startId: string, branchPrompt: string): Promise<BranchResult> {
     let nodeId = startId;
     let curPrompt = branchPrompt;
     const trail: TrailEntry[] = [];
-    let lastProducer = '';
+    let lastProducerArtifact = '';
+    let lastProducerNodeId: string | null = null;
+    let latestReview: { approved: boolean; feedback: string } | null = null;
+    let bestEffortUsed = false;
+    let bestEffortReason = '';
+
+    /** 分支终态：bestEffortUsed 时标 best_effort（保留降级事实），否则 completed。 */
+    const finalize = (output: string): BranchResult => ({
+      status: bestEffortUsed ? 'best_effort' : 'completed',
+      output,
+      ...(bestEffortReason ? { reason: bestEffortReason } : {}),
+    });
+
     while (true) {
       if (signal?.aborted) return { status: 'aborted' };
-      if (++totalExec > maxExec) return { status: 'global_limit', output: lastProducer };
+      if (++totalExec > maxExec) return { status: 'global_limit', output: lastProducerArtifact };
       const node = byId.get(nodeId);
-      if (!node || node.type !== 'agent') return { status: 'completed', output: lastProducer };
+      if (!node || node.type !== 'agent') return finalize(lastProducerArtifact);
 
       const iter = (nodeIter.get(nodeId) ?? 0) + 1;
       nodeIter.set(nodeId, iter);
@@ -191,35 +221,54 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
       const verdict: Verdict | null = isDecision ? extractVerdict(node, vctx) : null;
       trail.push({ nodeId, output: finalText, verdict: verdict ?? undefined, iter });
       lastCompletedOutput = finalText;
-      if (!isDecision) lastProducer = finalText;
+
+      // 显式状态（gap4）：producer 产出→设 artifact+清 review；decision→设 review（不碰 artifact）。
+      if (isDecision) {
+        latestReview = verdict ?? { approved: false, feedback: '(reviewer 未给出裁定)' };
+      } else {
+        lastProducerArtifact = finalText;
+        lastProducerNodeId = node.id;
+        latestReview = null;
+      }
 
       // 选边：决策点 满意→前向；不满意→回边。透传→前向。
-      const chosen: GraphEdge | undefined = isDecision
+      let chosen: GraphEdge | undefined = isDecision
         ? (verdict?.approved === true ? forward[0] : backs[0])
         : forward[0];
-      if (!chosen) return { status: 'completed', output: lastProducer };
+      if (!chosen) return finalize(lastProducerArtifact);
 
-      // 回边：该边覆盖次数达 maxIterations → 该分支 edge_limit（采用本分支最后生产者输出）
+      // 回边：覆盖次数达 maxIterations → best-effort（改走前向 + 发 gate_exhausted），不硬终止。
+      // gap2：显式重指 chosen 走前向，不能裸 fall through 走回边 target。
       if (isBack(chosen)) {
         const cap = chosen.maxIterations ?? DEFAULT_BACK_EDGE_MAX_ITER;
         const used = edgeCount.get(chosen.id) ?? 0;
         if (used >= cap) {
-          return { status: 'edge_limit', output: lastProducer, reason: `back-edge '${chosen.id}' reached maxIterations ${cap}` };
+          bestEffortUsed = true;
+          bestEffortReason = `gate '${chosen.id}' exhausted (maxIterations ${cap}); best-effort forward`;
+          const exEv = { type: 'gate_exhausted', runId, nodeId, edgeId: chosen.id, reason: bestEffortReason, lastProducerArtifact, reviewerFeedback: latestReview?.feedback ?? null } as const;
+          emit(exEv);
+          record?.(exEv);
+          const continuation = forward[0];
+          if (!continuation) return { status: 'best_effort', output: lastProducerArtifact, reason: bestEffortReason };
+          chosen = continuation; // 显式改走前向，fall through 到前向块
+        } else {
+          edgeCount.set(chosen.id, used + 1);
+          const tgtId = chosen.target;
+          const targetNode = byId.get(tgtId);
+          if (!targetNode || targetNode.type !== 'agent') return finalize(lastProducerArtifact);
+          nodeId = tgtId;
+          curPrompt = buildLegacyPrompt(targetNode, prompt, lastProducerArtifact, lastProducerNodeId, latestReview, graph.edges.some((e) => e.source === tgtId && isBack(e)));
+          continue;
         }
-        edgeCount.set(chosen.id, used + 1);
-        const targetNode = byId.get(chosen.target);
-        if (!targetNode || targetNode.type !== 'agent') return { status: 'completed', output: lastProducer };
-        nodeId = chosen.target;
-        curPrompt = buildPrompt(targetNode, trail, prompt, graph.edges.some((e) => e.source === chosen.target && isBack(e)));
-        continue;
       }
 
-      // 前向
-      if (graph.endNode && chosen.target === graph.endNode) return { status: 'completed', output: lastProducer };
-      const targetNode = byId.get(chosen.target);
-      if (!targetNode || targetNode.type !== 'agent') return { status: 'completed', output: lastProducer };
-      nodeId = chosen.target;
-      curPrompt = buildPrompt(targetNode, trail, prompt, graph.edges.some((e) => e.source === chosen.target && isBack(e)));
+      // 前向（chosen 为前向，含 best-effort 重指）
+      const fwdId = chosen.target;
+      if (graph.endNode && fwdId === graph.endNode) return finalize(lastProducerArtifact);
+      const targetNode = byId.get(fwdId);
+      if (!targetNode || targetNode.type !== 'agent') return finalize(lastProducerArtifact);
+      nodeId = fwdId;
+      curPrompt = buildLegacyPrompt(targetNode, prompt, lastProducerArtifact, lastProducerNodeId, latestReview, graph.edges.some((e) => e.source === fwdId && isBack(e)));
     }
   }
 
@@ -245,9 +294,10 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
     .filter((r): r is Extract<BranchResult, { output: string }> => 'output' in r && r.output !== '')
     .map((r) => r.output)
     .join('\n\n---\n\n') || lastCompletedOutput;
-  const elRes = results.find((r): r is Extract<BranchResult, { status: 'edge_limit' }> => r.status === 'edge_limit');
-  if (elRes) {
-    finish({ type: 'run_done', runId, finalText, termination: 'edge_limit', reason: elRes.reason });
+  // 优先级：best_effort > completed（下游成功不抹掉上游 best-effort 事实，gap1）
+  const beRes = results.find((r): r is Extract<BranchResult, { status: 'best_effort' }> => r.status === 'best_effort');
+  if (beRes) {
+    finish({ type: 'run_done', runId, finalText, termination: 'best_effort', reason: beRes.reason });
   } else {
     finish({ type: 'run_done', runId, finalText, termination: 'completed' });
   }
