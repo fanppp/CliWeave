@@ -52,6 +52,12 @@ export type PersistedRunEvent =
 /** @deprecated 用 PublicGraphEvent（保留别名供过渡）。 */
 export type GraphEvent = PublicGraphEvent;
 
+/** 单节点广播信封：按 instanceKey 路由 + 前端按 instanceKey 过滤（防 projA/projB 同 nodeKey 串台）。 */
+export interface NodeMessageEnvelope {
+  instanceKey: string;
+  message: AgentMessage;
+}
+
 export class SocketManager {
   private readonly io: SocketIOServer;
 
@@ -62,16 +68,21 @@ export class SocketManager {
       cors: { origin: (origin, cb) => { cb(null, !origin || allowed.includes(origin)); }, credentials: true },
     });
     this.io.on('connection', (socket: Socket) => {
-      socket.on('join_node', (nodeId: unknown) => {
-        // instanceKey 校验：拒任意字符串入 room
-        if (typeof nodeId === 'string' && isInstanceKey(nodeId)) socket.join(`node:${nodeId}`);
+      socket.on('join_node', (key: unknown, cb?: (ok: boolean) => void) => {
+        // instanceKey 校验：拒任意字符串入 room；ack 回传是否成功（防 HTTP 早于入 room 丢首批事件）
+        if (typeof key === 'string' && isInstanceKey(key)) {
+          socket.join(`node:${key}`);
+          cb?.(true);
+        } else {
+          cb?.(false);
+        }
       });
-      socket.on('leave_node', (nodeId: unknown) => {
-        if (typeof nodeId === 'string' && isInstanceKey(nodeId)) socket.leave(`node:${nodeId}`);
+      socket.on('leave_node', (key: unknown) => {
+        if (typeof key === 'string' && isInstanceKey(key)) socket.leave(`node:${key}`);
       });
-      socket.on('join_graph', (runId: unknown, cb?: () => void) => {
+      socket.on('join_graph', (runId: unknown, cback?: () => void) => {
         if (typeof runId === 'string') socket.join(`graph:${runId}`);
-        cb?.();
+        cback?.();
       });
       socket.on('leave_graph', (runId: unknown) => {
         if (typeof runId === 'string') socket.leave(`graph:${runId}`);
@@ -79,9 +90,9 @@ export class SocketManager {
     });
   }
 
-  /** 向订阅了某节点的所有客户端广播一条 AgentMessage */
-  broadcast(msg: AgentMessage, nodeId: string): void {
-    this.io.to(`node:${nodeId}`).emit('agent_message', msg);
+  /** 向订阅了某节点(instanceKey)的所有客户端广播一条 AgentMessage（信封含 instanceKey 供前端过滤）。 */
+  broadcast(msg: AgentMessage, instanceKey: string): void {
+    this.io.to(`node:${instanceKey}`).emit('agent_message', { instanceKey, message: msg } satisfies NodeMessageEnvelope);
   }
 
   /** 向订阅了某图运行的所有客户端广播一个 Graph envelope 事件 */

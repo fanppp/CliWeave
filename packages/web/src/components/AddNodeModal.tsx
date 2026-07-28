@@ -12,7 +12,8 @@ interface ProviderMeta {
   installed: boolean;
 }
 
-export function AddNodeModal({ onClose, onCreated }: { onClose: () => void; onCreated: (nodeKey: string) => void }) {
+export function AddNodeModal({ onClose, onCreated }: { onClose: () => void; onCreated: (nodeKey: string, instanceKey: string) => void }) {
+  const projectId = useChatStore((s) => s.projectId);
   const [providers, setProviders] = useState<ProviderMeta[]>([]);
   const [provider, setProvider] = useState('codex');
   const [localId, setLocalId] = useState('');
@@ -23,7 +24,7 @@ export function AddNodeModal({ onClose, onCreated }: { onClose: () => void; onCr
   const [error, setError] = useState('');
 
   useEffect(() => {
-    fetch(`${API_URL}/api/agents/providers`)
+    fetch(`${API_URL}/api/providers`)
       .then((r) => (r.ok ? r.json() : []))
       .then((list: ProviderMeta[]) => {
         setProviders(Array.isArray(list) ? list : []);
@@ -37,16 +38,16 @@ export function AddNodeModal({ onClose, onCreated }: { onClose: () => void; onCr
     setBusy(true);
     setError('');
     try {
-      const res = await fetch(`${API_URL}/api/providers/${encodeURIComponent(provider)}/agents`, {
+      const res = await fetch(`${API_URL}/api/projects/${projectId}/nodes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ localId: trimmedId, name: name.trim() || trimmedId, model: model.trim(), identity: identity.trim() }),
+        body: JSON.stringify({ provider, localId: trimmedId, name: name.trim() || trimmedId, model: model.trim(), identity: identity.trim() }),
       });
       const d = await res.json();
       if (!res.ok) {
         setError(d.error ?? '创建失败');
       } else {
-        onCreated(d.nodeKey);
+        onCreated(d.nodeKey, d.instanceKey);
       }
     } catch (e) {
       setError(String(e));

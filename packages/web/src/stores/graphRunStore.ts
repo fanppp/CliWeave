@@ -64,7 +64,7 @@ export interface GraphBubble {
   timestamp: number;
 }
 
-export type GraphRunStatus = 'idle' | 'running' | 'done' | 'error';
+export type GraphRunStatus = 'idle' | 'starting' | 'running' | 'done' | 'error';
 
 interface GraphRunState {
   graph: Graph | null;
@@ -180,7 +180,8 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
     });
     if (!createRes.ok) throw new Error(`创建运行失败: ${(await createRes.json()).error ?? createRes.status}`);
     const { runId } = (await createRes.json()) as { runId: string };
-    set({ currentRunId: runId });
+    // starting：run 已创建、首个 node_started 前的窗口（供项目切换仲裁识别"忙"）
+    set({ currentRunId: runId, status: 'starting' });
     // join_graph 用 ack 回调确认已入 room 再 start（防丢首批事件）
     await new Promise<void>((resolve, reject) => {
       socket.timeout(5000).emit('join_graph', runId, (err?: unknown) => {

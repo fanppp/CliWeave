@@ -14,9 +14,11 @@ import { buildAgent, getActiveSessionCtx, setActiveSessionCtx } from '../AgentSe
 import { formatInstanceKey } from '../instance-key.js';
 import { formatSubInvocationId, registerSubInvocation, removeSubInvocation } from '../run-registry.js';
 import { withNodeLock } from '../node-mutex.js';
+import { invokeAgentWithPolicy } from '../invoke-agent.js';
+import type { SessionPolicy, NodeOutcome } from '../session-policy.js';
+import type { AgentMessage } from '../types.js';
 import { computeBackEdges, DEFAULT_BACK_EDGE_MAX_ITER, type Graph, type GraphAgentNode, type GraphEdge } from './graph.js';
 import { extractVerdict, type TrailEntry, type Verdict, type VerdictContext } from './verdict.js';
-import type { AgentMessage } from '../types.js';
 import type { PublicGraphEvent, PersistedRunEvent } from '../../infrastructure/websocket/SocketManager.js';
 
 export interface ExecuteOptions {
@@ -29,21 +31,22 @@ export interface ExecuteOptions {
   signal?: AbortSignal;
 }
 
-interface NodeOutcome {
-  status: 'ok' | 'error' | 'aborted';
-  finalText?: string;
-  error?: string;
+/** 节点执行上下文（第 4 参，测试 wrapper 必须透传，不依赖少参数赋值）。 */
+export interface NodeExecContext {
+  iteration: number;
+  sessionPolicy: SessionPolicy;
 }
 
-export type ExecNode = (node: GraphAgentNode, prompt: string, opts: ExecuteOptions, iteration?: number) => Promise<NodeOutcome>;
+export type ExecNode = (node: GraphAgentNode, prompt: string, opts: ExecuteOptions, context: NodeExecContext) => Promise<NodeOutcome>;
 
 function ts(): number {
   return Date.now();
 }
 
-/** 真实执行单个 agent 节点（画布实例隔离）。 */
-export async function runAgentNode(node: GraphAgentNode, nodePrompt: string, opts: ExecuteOptions, iteration: number = 0): Promise<NodeOutcome> {
+/** 真实执行单个 agent 节点（画布实例隔离）。图运行收 fresh/resume，永不传 active → 不触碰 active-session.json。 */
+export async function runAgentNode(node: GraphAgentNode, nodePrompt: string, opts: ExecuteOptions, context: NodeExecContext): Promise<NodeOutcome> {
   const { runId, projectId, emit, record, signal } = opts;
+  const { iteration, sessionPolicy } = context;
   const instanceKey = formatInstanceKey(projectId, node.agentNodeKey);
   const emitBoth = (e: PublicGraphEvent): void => {
     emit(e);
@@ -55,42 +58,31 @@ export async function runAgentNode(node: GraphAgentNode, nodePrompt: string, opt
       if (signal?.aborted) return { status: 'aborted' } satisfies NodeOutcome;
       emitBoth({ type: 'node_started', runId, nodeId: node.id, instanceKey });
       const { ctx, service } = await buildAgent(projectId, node.agentNodeKey);
-      const sessionId = getActiveSessionCtx(ctx);
-      const texts: string[] = [];
       subInvocationId = formatSubInvocationId(runId, node.id, iteration);
       // 登记 sub-invocation（RunRegistry，供按 run 查询/审计）；spawnCli 据 invocationId+runId 登记 PID
       registerSubInvocation({ subInvocationId, parentRunId: runId, projectId, instanceKey, createdAt: Date.now() });
 
-      for await (const msg of service.invoke(nodePrompt, {
-        sessionId,
+      const outcome = await invokeAgentWithPolicy({
+        service,
+        nodeId: node.id,
+        prompt: nodePrompt,
+        policy: sessionPolicy,
         workingDirectory: ctx.projectPath,
         invocationId: subInvocationId,
         runId,
-        ...(signal ? { signal } : {}),
-      })) {
-        if (msg.type === 'session_init') {
-          setActiveSessionCtx(ctx, msg.sessionId);
-          continue;
-        }
-        if (msg.type === 'done') continue;
-        if (msg.type === 'error') {
-          emitBoth({ type: 'node_message', runId, nodeId: node.id, instanceKey, message: msg });
-          emitBoth({ type: 'node_error', runId, nodeId: node.id, instanceKey, error: msg.error });
-          return { status: 'error', error: msg.error } satisfies NodeOutcome;
-        }
-        if (msg.type === 'text' && !msg.content.startsWith('[notice]')) texts.push(msg.content);
-        emitBoth({ type: 'node_message', runId, nodeId: node.id, instanceKey, message: msg });
-      }
-      if (signal?.aborted) return { status: 'aborted' } satisfies NodeOutcome;
+        signal,
+        onMessage: (msg) => emitBoth({ type: 'node_message', runId, nodeId: node.id, instanceKey, message: msg }),
+        getActiveSession: () => getActiveSessionCtx(ctx),
+        setActiveSession: (sid) => setActiveSessionCtx(ctx, sid),
+      });
 
-      const finalText = texts.at(-1) ?? '';
-      if (!finalText) {
-        const error = `node '${node.id}' produced no valid text output`;
-        emitBoth({ type: 'node_error', runId, nodeId: node.id, instanceKey, error });
-        return { status: 'error', error } satisfies NodeOutcome;
+      if (outcome.status === 'ok') {
+        emitBoth({ type: 'node_done', runId, nodeId: node.id, instanceKey });
+      } else if (outcome.status === 'error') {
+        emitBoth({ type: 'node_error', runId, nodeId: node.id, instanceKey, error: outcome.error ?? '' });
       }
-      emitBoth({ type: 'node_done', runId, nodeId: node.id, instanceKey });
-      return { status: 'ok', finalText } satisfies NodeOutcome;
+      // aborted：不发终态，由 walkGraph 发 run_aborted
+      return outcome;
     });
   } catch (err) {
     if (signal?.aborted) return { status: 'aborted' };
@@ -202,6 +194,8 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
     let latestReview: { approved: boolean; feedback: string } | null = null;
     let bestEffortUsed = false;
     let bestEffortReason = '';
+    // producer nodeId → sessionId（branch 内，run-scoped）：rework(回边回到 producer) resume 该 session
+    const producerSessions = new Map<string, string>();
 
     /** 分支终态：bestEffortUsed 时标 best_effort（保留降级事实），否则 completed。 */
     const finalize = (output: string): BranchResult => ({
@@ -248,7 +242,12 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
       const isDecision = backs.length > 0;
 
       const curPrompt = buildLegacyPrompt(node, prompt, upstreamArtifacts, lastProducerNodeId, latestReview, isDecision);
-      const outcome = await exec(node, curPrompt, opts, iter);
+      // 会话策略：rework(回边回到 producer) resume 该 producer 的 session；其余 fresh。图运行永不传 active。
+      const sessionPolicy: SessionPolicy =
+        arrivedViaBack && producerSessions.has(nodeId)
+          ? { mode: 'resume', sessionId: producerSessions.get(nodeId)!, persistActive: false }
+          : { mode: 'fresh', persistActive: false };
+      const outcome = await exec(node, curPrompt, opts, { iteration: iter, sessionPolicy });
       if (outcome.status === 'aborted') return { status: 'aborted' };
       if (outcome.status === 'error') return { status: 'error', error: outcome.error ?? `node '${nodeId}' failed` };
       const finalText = outcome.finalText ?? '';
@@ -264,6 +263,8 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
         lastProducerArtifact = finalText;
         lastProducerNodeId = node.id;
         latestReview = null;
+        // 捕获 producer 的 sessionId（供后续 rework resume）；resumeFallback 时 outcome.sessionId 已是 fresh 的新 id
+        if (outcome.sessionId) producerSessions.set(node.id, outcome.sessionId);
       }
 
       // 选边：决策点 满意→前向；不满意→回边。透传→前向。

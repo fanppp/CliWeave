@@ -1,6 +1,8 @@
 'use client';
 
 import { useEffect, useState, type CSSProperties } from 'react';
+import { useChatStore } from '../stores/chatStore';
+import { useGraphRunStore } from '../stores/graphRunStore';
 import { useProjectStore } from '../stores/projectStore';
 
 export function ProjectPicker() {
@@ -9,11 +11,15 @@ export function ProjectPicker() {
   const loadProjects = useProjectStore((s) => s.loadProjects);
   const switchProject = useProjectStore((s) => s.switchProject);
   const createProject = useProjectStore((s) => s.createProject);
+  const chatStreaming = useChatStore((s) => s.isStreaming);
+  const graphStatus = useGraphRunStore((s) => s.status);
+  // 切换仲裁：单节点消息或图运行忙时禁用（防 abort 拿新 projectId 杀旧 invocation）
+  const busy = chatStreaming || graphStatus === 'starting' || graphStatus === 'running';
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [path, setPath] = useState('');
   const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busyCreate, setBusy] = useState(false);
 
   useEffect(() => {
     void loadProjects();
@@ -54,7 +60,8 @@ export function ProjectPicker() {
         style={styles.select}
         value={currentId}
         onChange={(e) => switchProject(e.target.value)}
-        title='切换画布'
+        disabled={busy}
+        title={busy ? '请先停止当前运行再切换画布' : '切换画布'}
       >
         {projects.map((p) => (
           <option key={p.id} value={p.id}>
@@ -62,7 +69,7 @@ export function ProjectPicker() {
           </option>
         ))}
       </select>
-      <button type='button' style={styles.btn} onClick={() => setOpen((v) => !v)}>+ 新画布</button>
+      <button type='button' style={styles.btn} onClick={() => setOpen((v) => !v)} disabled={busy}>+ 新画布</button>
       {open && (
         <div style={styles.dialog}>
           <div style={styles.row}>

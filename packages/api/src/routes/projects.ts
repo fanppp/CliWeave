@@ -44,6 +44,7 @@ import {
 } from '../agents/run-registry.js';
 import { resolveInstanceDescriptorPaths } from '../agents/node-instance.js';
 import { executeGraph } from '../agents/graph/AgentRouter.js';
+import { invokeAgentWithPolicy } from '../agents/invoke-agent.js';
 import {
   closeRunStream,
   listRuns,
@@ -306,7 +307,48 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
 
   // ── 节点实例编辑/读取 ────────────────────────────────────────
   app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/nodes', async (request) => {
-    return { nodes: listProjectNodeInstances(request.params.projectId) };
+    const pid = request.params.projectId;
+    const nodes = listProjectNodeInstances(pid).map((n) => ({
+      ...n,
+      instanceKey: formatInstanceKey(pid, n.nodeKey),
+    }));
+    return { nodes };
+  });
+
+  // 实例-only 创建（不加图节点；node 模式用）。校验 provider enabled + 项目存在 + scaffold 由 instantiateNodeInstance 负责。
+  app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/nodes', async (request, reply) => {
+    const { projectId } = request.params;
+    const body = (request.body ?? {}) as {
+      provider?: unknown; localId?: unknown; name?: unknown; model?: unknown; identity?: unknown;
+    };
+    const provider = typeof body.provider === 'string' ? body.provider.trim() : '';
+    const localId = typeof body.localId === 'string' ? body.localId.trim() : '';
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!provider || !localId || !name) {
+      return reply.code(400).send({ error: 'provider, localId, name are required' });
+    }
+    const meta = PROVIDERS.find((p) => p.id === provider);
+    if (!meta) return reply.code(400).send({ error: `unknown provider: ${provider}` });
+    if (!meta.installed) return reply.code(409).send({ error: `provider '${provider}' is disabled (not installed)` });
+    const nodeKey = `${provider}:${localId}`;
+    try {
+      readProjectNodeInstance(projectId, nodeKey);
+      return reply.code(409).send({ error: `node already exists: ${nodeKey}` });
+    } catch {
+      /* 不存在，继续 */
+    }
+    try {
+      const ctx = instantiateNodeInstance(projectId, nodeKey, {
+        name,
+        command: meta.command,
+        memoryHome: meta.memoryHome,
+        ...(typeof body.model === 'string' && body.model.trim() ? { model: body.model.trim() } : meta.defaultModel ? { model: meta.defaultModel } : {}),
+        ...(typeof body.identity === 'string' ? { identity: body.identity } : {}),
+      });
+      return reply.code(201).send({ status: 'ok', nodeKey, localId: ctx.descriptor.localId, instanceKey: formatInstanceKey(projectId, nodeKey) });
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
   });
 
   app.get<{ Params: { projectId: string; nodeKey: string } }>(
@@ -500,27 +542,30 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
         try {
           await withNodeLock(instanceKey, async () => {
             const { ctx, service } = await buildAgent(projectId, nodeKey);
-            const sessionId = getActiveSessionCtx(ctx);
+            const resumeSid = getActiveSessionCtx(ctx);
             socketManager.broadcast(
-              { type: 'system_info', nodeId: nodeKey, content: JSON.stringify({ type: 'invoking', invocationId, resume: !!sessionId }), timestamp: Date.now() },
+              { type: 'system_info', nodeId: nodeKey, content: JSON.stringify({ type: 'invoking', invocationId, resume: !!resumeSid }), timestamp: Date.now() },
               instanceKey,
             );
-            for await (const msg of service.invoke(text, {
-              sessionId,
+            const outcome = await invokeAgentWithPolicy({
+              service,
+              nodeId: nodeKey,
+              prompt: text,
+              policy: { mode: 'active' },
               workingDirectory: ctx.projectPath,
               invocationId,
               signal: controller.signal,
-            })) {
-              if (msg.type === 'session_init') {
-                setActiveSessionCtx(ctx, msg.sessionId);
-                continue;
-              }
-              socketManager.broadcast(msg, instanceKey);
-            }
-            if (aborted) {
+              onMessage: (msg) => socketManager.broadcast(msg, instanceKey),
+              getActiveSession: () => getActiveSessionCtx(ctx),
+              setActiveSession: (sid) => setActiveSessionCtx(ctx, sid),
+            });
+            if (outcome.status === 'aborted' || aborted) {
               socketManager.broadcast({ type: 'system_info', nodeId: nodeKey, content: '已中止', timestamp: Date.now() }, instanceKey);
-              socketManager.broadcast({ type: 'done', nodeId: nodeKey, timestamp: Date.now() }, instanceKey);
+            } else if (outcome.status === 'error') {
+              socketManager.broadcast({ type: 'error', nodeId: nodeKey, error: outcome.error ?? '', timestamp: Date.now() }, instanceKey);
             }
+            // 唯一终态 done（helper 吞了 provider 的 done/error，此处统一发一次）
+            socketManager.broadcast({ type: 'done', nodeId: nodeKey, timestamp: Date.now() }, instanceKey);
           });
           // 终态由结果决定：aborted 不覆盖成 done
           transitionRunStatus(invocationId, aborted ? 'aborted' : 'done');

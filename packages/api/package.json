@@ -9,7 +9,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/agents/cli-storage.test.ts src/agents/graph/graph.test.ts src/agents/graph/agent-router.test.ts"
+    "test": "tsx --test src/agents/cli-storage.test.ts src/agents/registries.test.ts src/agents/active-session.test.ts src/agents/invoke-agent.test.ts src/agents/graph/graph.test.ts src/agents/graph/agent-router.test.ts src/agents/providers/codex-session-fallback.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^9.0.0",

@@ -39,6 +39,14 @@ export type AgentMessage =
   | { type: 'tool_result'; nodeId: NodeId; content: string; timestamp: number; metadata?: MessageMetadata }
   | { type: 'error'; nodeId: NodeId; error: string; timestamp: number; metadata?: MessageMetadata }
   | { type: 'system_info'; nodeId: NodeId; content: string; timestamp: number }
+  | {
+      /** provider resume 不可用且无实质输出时回退 fresh 的诊断信号（非终态）。Router/调用方据此置 NodeOutcome.resumeFallback。 */
+      type: 'session_fallback';
+      nodeId: NodeId;
+      previousSessionId: string;
+      reason: 'not_found' | 'invalid' | 'unavailable';
+      timestamp: number;
+    }
   | { type: 'done'; nodeId: NodeId; timestamp: number; metadata?: MessageMetadata };
 
 export function makeMessage<T extends AgentMessage>(msg: T): T {

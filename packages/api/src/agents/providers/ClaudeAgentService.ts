@@ -8,7 +8,7 @@
  *   记忆/会话存项目内 CLAUDE_CONFIG_DIR=agents/<node>/data/cli/.claude。
  */
 import { spawnCli, isCliError, isCliTimeout } from '../../utils/cli-spawn.js';
-import type { CliSpawnOptions } from '../../utils/cli-types.js';
+import type { CliSpawnOptions, SpawnFn } from '../../utils/cli-types.js';
 import type { AgentService, AgentServiceOptions } from '../AgentService.js';
 import type { AgentMessage, MessageMetadata, NodeId } from '../types.js';
 import type { NodeDescriptorV4 } from '../NodeDescriptor.js';
@@ -25,27 +25,32 @@ export class ClaudeAgentService implements AgentService {
   private readonly ctx: NodeInstanceContext;
   private readonly descriptor: NodeDescriptorV4;
   private readonly compiledL0: string | undefined;
+  /** 测试缝：注入 fake spawn（生产不传）。 */
+  private readonly spawnFn?: SpawnFn;
 
-  constructor(ctx: NodeInstanceContext, compiledL0: string | undefined) {
+  constructor(ctx: NodeInstanceContext, compiledL0: string | undefined, spawnFn?: SpawnFn) {
     this.ctx = ctx;
     this.descriptor = resolveInstanceDescriptorPaths(ctx);
     this.compiledL0 = compiledL0;
     this.nodeId = ctx.nodeKey;
+    this.spawnFn = spawnFn;
   }
 
   async *invoke(prompt: string, options?: AgentServiceOptions): AsyncIterable<AgentMessage> {
     const sessionId = options?.sessionId;
     if (sessionId) {
-      // 先尝试 resume；若陈旧 session 快速失败（无实质输出）则回退全新会话
+      // 先尝试 resume；若陈旧 session 快速失败（无实质输出）则发 session_fallback 诊断并回退全新会话
       const status = yield* this.runOnce(prompt, options, sessionId, true);
       if (status === 'resume-failed') {
         yield {
-          type: 'system_info',
+          type: 'session_fallback',
           nodeId: this.nodeId,
-          content: 'resume 失败（会话已陈旧），已回退到全新会话',
+          previousSessionId: sessionId,
+          reason: 'not_found',
           timestamp: Date.now(),
         };
-        yield* this.runOnce(prompt, options, undefined, false);
+        const fbOptions = options && options.invocationId ? { ...options, invocationId: `${options.invocationId}:fb` } : options;
+        yield* this.runOnce(prompt, fbOptions, undefined, false);
       }
       return;
     }
@@ -96,7 +101,7 @@ export class ClaudeAgentService implements AgentService {
     let sawOutput = false;
     let terminalYielded = false;
     try {
-      for await (const event of spawnCli(spawnOpts)) {
+      for await (const event of spawnCli(spawnOpts, this.spawnFn ? { spawnFn: this.spawnFn } : undefined)) {
         if (isCliTimeout(event)) {
           terminalYielded = true;
           yield { type: 'error', nodeId: this.nodeId, error: `Claude CLI 响应超时 (${Math.round(event.timeoutMs / 1000)}s)`, metadata, timestamp: Date.now() };

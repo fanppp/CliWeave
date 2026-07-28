@@ -32,10 +32,10 @@ function readText(path: string): string | undefined {
   }
 }
 
-function deprecate(reply: import('fastify').FastifyReply): void {
+function deprecate(reply: import('fastify').FastifyReply, successor = '/api/projects/default/nodes'): void {
   reply.header('Deprecation', 'true');
-  reply.header('Sunset', 'Wed, 31 Dec 2025 00:00:00 GMT');
-  reply.header('Link', '</api/projects/default/nodes>; rel="successor-version"');
+  reply.header('Sunset', 'Wed, 31 Dec 2026 00:00:00 GMT');
+  reply.header('Link', `<${successor}>; rel="successor-version"`);
 }
 
 const agentsRoutes: FastifyPluginCallback = (app, _options, done) => {
@@ -51,7 +51,10 @@ const agentsRoutes: FastifyPluginCallback = (app, _options, done) => {
     }));
   });
 
-  app.get('/api/agents/providers', async () => PROVIDERS);
+  app.get('/api/agents/providers', async (_request, reply) => {
+    deprecate(reply, '/api/providers');
+    return PROVIDERS;
+  });
 
   // 在 default 画布内新建实例（legacy 创建别名）
   app.post('/api/providers/:provider/agents', async (request, reply) => {

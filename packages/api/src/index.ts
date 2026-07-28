@@ -12,6 +12,7 @@ import agentsRoutes from './routes/agents.js';
 import graphRoutes from './routes/graph.js';
 import messagesRoutes from './routes/messages.js';
 import projectsRoutes from './routes/projects.js';
+import providersRoutes from './routes/providers.js';
 
 const PORT = parseInt(process.env.API_SERVER_PORT ?? '3004', 10);
 const HOST = process.env.API_SERVER_HOST ?? '127.0.0.1';
@@ -69,6 +70,7 @@ async function main(): Promise<void> {
   await app.register(messagesRoutes, { socketManager });
   await app.register(graphRoutes, { socketManager });
   await app.register(projectsRoutes, { socketManager });
+  await app.register(providersRoutes);
   await app.register(agentsRoutes);
 
   try {

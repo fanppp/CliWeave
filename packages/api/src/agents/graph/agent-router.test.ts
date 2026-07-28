@@ -33,7 +33,7 @@ function makeGraph(maxIter: number | undefined): Graph {
 
 function makeExec(aQueue: string[], bQueue: string[]): ExecNode {
   let callNo = 0;
-  return async (node, _prompt, opts) => {
+  return async (node, _prompt, opts, _context) => {
     callNo++;
     opts.emit({ type: 'node_started', runId: opts.runId, nodeId: node.id });
     const finalText = node.id === 'B' ? `review\nVERDICT: ${bQueue.shift() ?? 'REJECT'}` : `A-output-${aQueue.shift() ?? 'x'}`;
@@ -46,7 +46,7 @@ function makeExec(aQueue: string[], bQueue: string[]): ExecNode {
 /** 通用脚本式 exec：按 nodeId 取下一句 finalText；捕获每个节点收到的 prompt 列表。 */
 function makeScriptedExec(scripts: Record<string, string[]>): { exec: ExecNode; prompts: Record<string, string[]> } {
   const prompts: Record<string, string[]> = {};
-  const exec: ExecNode = async (node, prompt, opts) => {
+  const exec: ExecNode = async (node, prompt, opts, _context) => {
     (prompts[node.id] ??= []).push(prompt);
     opts.emit({ type: 'node_started', runId: opts.runId, nodeId: node.id });
     const finalText = (scripts[node.id] ?? []).shift() ?? `${node.id}-out`;
@@ -101,7 +101,7 @@ describe('walkGraph V3 legacy runner', () => {
   it('不满意两次后满意 → run_done completed（A 跑 3 次）', async () => {
     const exec = makeExec(['1', '2', '3'], ['REJECT', 'REJECT', 'APPROVE']);
     const calls: string[] = [];
-    const wrapped: ExecNode = async (n, p, o) => { calls.push(n.id); return exec(n, p, o); };
+    const wrapped: ExecNode = async (n, p, o, c) => { calls.push(n.id); return exec(n, p, o, c); };
     const ev = await runWalkAsync(makeGraph(3), wrapped);
     const t = terminal(ev) as { type: string; termination: string };
     assert.equal(t.type, 'run_done');
@@ -146,7 +146,7 @@ describe('walkGraph V3 legacy runner', () => {
     let callNo = 0;
     const aQ = ['1', '2', '3'];
     const bQ = ['REJECT', 'REJECT', 'APPROVE'];
-    const exec: ExecNode = async (node, _prompt, opts) => {
+    const exec: ExecNode = async (node, _prompt, opts, _context) => {
       callNo++;
       if (callNo === 3) { controller.abort(); return { status: 'aborted' as const }; }
       opts.emit({ type: 'node_started', runId: opts.runId, nodeId: node.id });
@@ -193,7 +193,7 @@ describe('walkGraph V3 legacy runner', () => {
       ],
     };
     const calls: string[] = [];
-    const exec: ExecNode = async (node, _p, opts) => {
+    const exec: ExecNode = async (node, _p, opts, _context) => {
       calls.push(node.id);
       opts.emit({ type: 'node_started', runId: opts.runId, nodeId: node.id });
       const finalText = `${node.id}-out`;
@@ -340,6 +340,34 @@ describe('walkGraph V3 legacy runner', () => {
     const upstream = region(cPrompts[0], '上游产物');
     assert.ok(upstream.includes('需求'), 'C 聚合 input 直连产物');
     assert.ok(upstream.includes('A-artifact'), 'C 聚合 B 路径的 producer 产物');
+  });
+
+  it('walk 策略：producer 首执行 fresh，rework resume(producerSid)，decision/join fresh；全程无 active', async () => {
+    // A→B(decision, back→A)：B reject 一次后 approve → A 跑 2 次（fresh + resume），B 每次 fresh
+    const bQueue = ['REJECT', 'APPROVE'];
+    const aSid = 'A-session-id';
+    const policies: { node: string; mode: string; sid?: string }[] = [];
+    const exec: ExecNode = async (node, _prompt, opts, context) => {
+      policies.push({
+        node: node.id,
+        mode: context.sessionPolicy.mode,
+        ...(context.sessionPolicy.mode === 'resume' ? { sid: context.sessionPolicy.sessionId } : {}),
+      });
+      opts.emit({ type: 'node_started', runId: opts.runId, nodeId: node.id });
+      const finalText = node.id === 'B' ? `review\nVERDICT: ${bQueue.shift()}` : 'A-out';
+      opts.emit({ type: 'node_message', runId: opts.runId, nodeId: node.id, message: { type: 'text', nodeId: node.id, content: finalText, timestamp: Date.now() } });
+      opts.emit({ type: 'node_done', runId: opts.runId, nodeId: node.id });
+      return { status: 'ok', finalText, ...(node.id === 'A' ? { sessionId: aSid } : {}) };
+    };
+    await runWalkAsync(makeGraph(3), exec);
+    const aPolicies = policies.filter((p) => p.node === 'A');
+    const bPolicies = policies.filter((p) => p.node === 'B');
+    assert.equal(aPolicies.length, 2, 'A 跑 2 次（初稿 + rework）');
+    assert.equal(aPolicies[0].mode, 'fresh', 'A 初稿 fresh');
+    assert.equal(aPolicies[1].mode, 'resume', 'A rework resume');
+    assert.equal(aPolicies[1].sid, aSid, 'rework resume 用 producer 的 sessionId');
+    assert.ok(bPolicies.every((p) => p.mode === 'fresh'), 'decision 每次 fresh');
+    assert.ok(policies.every((p) => p.mode !== 'active'), '图运行全程不传 active → 不触碰 active-session.json');
   });
 });
 

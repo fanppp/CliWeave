@@ -13,6 +13,7 @@ interface SessionItem {
 }
 
 export function SessionPicker() {
+  const projectId = useChatStore((s) => s.projectId);
   const activeNodeId = useChatStore((s) => s.activeNodeId);
   const reloadKey = useChatStore((s) => s.reloadKey);
   const triggerReload = useChatStore((s) => s.triggerReload);
@@ -23,24 +24,35 @@ export function SessionPicker() {
   const [creating, setCreating] = useState(false);
 
   const refresh = (): void => {
-    fetch(`${API_URL}/api/agents/${encodeURIComponent(activeNodeId)}/sessions`)
+    const pid = useChatStore.getState().projectId;
+    const node = useChatStore.getState().activeNodeId;
+    fetch(`${API_URL}/api/projects/${pid}/nodes/${encodeURIComponent(node)}/sessions`)
       .then((r) => (r.ok ? r.json() : { sessions: [], activeSessionId: null }))
       .then((d) => {
+        if (useChatStore.getState().projectId !== pid) return;
         setSessions(Array.isArray(d.sessions) ? d.sessions : []);
         setActive(typeof d.activeSessionId === 'string' ? d.activeSessionId : '');
       })
       .catch(() => setSessions([]));
   };
 
-  useEffect(refresh, [activeNodeId, reloadKey]);
+  useEffect(refresh, [projectId, activeNodeId, reloadKey]);
 
   const activate = (sid: string): void => {
-    fetch(`${API_URL}/api/agents/${encodeURIComponent(activeNodeId)}/sessions/activate`, {
+    const pid = useChatStore.getState().projectId;
+    const node = useChatStore.getState().activeNodeId;
+    fetch(`${API_URL}/api/projects/${pid}/nodes/${encodeURIComponent(node)}/sessions/activate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId: sid }),
     })
+      .then((r) => {
+        if (!r.ok) return null;
+        if (useChatStore.getState().projectId !== pid) return null;
+        return r.json();
+      })
       .then(() => {
+        if (useChatStore.getState().projectId !== pid) return;
         setActive(sid);
         triggerReload(); // 重新加载该会话历史
       })
@@ -51,10 +63,13 @@ export function SessionPicker() {
     if (creating || isStreaming) return;
     setCreating(true);
     try {
-      const response = await fetch(`${API_URL}/api/agents/${encodeURIComponent(activeNodeId)}/sessions/new`, {
+      const pid = useChatStore.getState().projectId;
+      const node = useChatStore.getState().activeNodeId;
+      const response = await fetch(`${API_URL}/api/projects/${pid}/nodes/${encodeURIComponent(node)}/sessions/new`, {
         method: 'POST',
       });
       if (!response.ok) return;
+      if (useChatStore.getState().projectId !== pid) return;
       setActive('');
       clear();
       triggerReload();

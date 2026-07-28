@@ -1,10 +1,19 @@
 'use client';
 
 import { create } from 'zustand';
+import { useChatStore } from './chatStore';
 import { useGraphRunStore } from './graphRunStore';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3004';
 const CURRENT_PROJECT_KEY = 'cliweave.currentProject';
+
+/** 切换画布前的统一仲裁：单节点消息或图运行忙时拒绝（防 abort 拿新 projectId 杀旧 invocation、防状态分裂）。 */
+export function canSwitchProject(): boolean {
+  const chatBusy = useChatStore.getState().isStreaming;
+  const graphStatus = useGraphRunStore.getState().status;
+  const graphBusy = graphStatus === 'starting' || graphStatus === 'running';
+  return !chatBusy && !graphBusy;
+}
 
 export interface ProjectMeta {
   id: string;
@@ -50,17 +59,19 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         const restore = list.some((p) => p.id === stored) ? stored : (list[0]?.id ?? 'default');
         set({ projects: list, currentId: restore });
         writeStoredCurrentId(restore);
-        // 联动 graphRunStore 到恢复的画布
+        // 联动 graphRunStore + chatStore 到恢复的画布
         if (useGraphRunStore.getState().projectId !== restore) {
           useGraphRunStore.getState().setProjectId(restore);
           await useGraphRunStore.getState().loadProjectGraph();
         }
+        useChatStore.getState().setProjectId(restore);
       }
     } catch {
       // 忽略
     }
   },
   createProject: async (name, path) => {
+    if (!canSwitchProject()) throw new Error('请先停止当前运行再创建画布');
     const res = await fetch(`${API_URL}/api/projects`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -75,12 +86,15 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     writeStoredCurrentId(meta.id);
     useGraphRunStore.getState().setProjectId(meta.id);
     await useGraphRunStore.getState().loadProjectGraph();
+    useChatStore.getState().setProjectId(meta.id);
     return meta.id;
   },
   switchProject: (id) => {
+    if (!canSwitchProject()) throw new Error('请先停止当前运行再切换画布');
     set({ currentId: id });
     writeStoredCurrentId(id);
     useGraphRunStore.getState().setProjectId(id);
     void useGraphRunStore.getState().loadProjectGraph();
+    useChatStore.getState().setProjectId(id);
   },
 }));
