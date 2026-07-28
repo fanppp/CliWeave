@@ -21,11 +21,11 @@ export function RunPicker() {
   const { runs, loading, loadRun, loadLatest, backToLive } = useGraphRuns();
   const replayGraph = useGraphRunStore((s) => s.replayGraph);
 
-  // 进入图模式自动加载最近一次完成的 run
+  // 进入图模式自动加载最近一次完成的 run；切画布（loadLatest 随 projectId 变）也重跑
   useEffect(() => {
     void loadLatest();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadLatest]);
 
   return (
     <div style={styles.wrap}>
