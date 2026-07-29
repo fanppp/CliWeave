@@ -53,7 +53,7 @@ export function isAllowedResumeAction(checkpoint: HarnessCheckpoint, action: str
   return allowed.includes(action as ResumeAction);
 }
 
-export async function walkEvaluatorOptimizerGraph(prompt: string, graph: GraphV4, opts: ExecuteOptions, exec: ExecNode, resume?: { checkpoint: HarnessCheckpoint; action: ResumeAction }): Promise<void> {
+export async function walkEvaluatorOptimizerGraph(prompt: string, graph: GraphV4, opts: ExecuteOptions, exec: ExecNode, resume?: { checkpoint: HarnessCheckpoint; action: ResumeAction }, startNodeId?: string): Promise<void> {
   const { runId, projectId, emit, record, signal } = opts;
   const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
   let totalExec = 0;
@@ -71,7 +71,9 @@ export async function walkEvaluatorOptimizerGraph(prompt: string, graph: GraphV4
   const forwardFrom = (nodeId: string) => graph.edges.find((e) => e.kind === 'forward' && e.source === nodeId);
   const inputEdges: Extract<GraphV4['edges'][number], { kind: 'forward' }>[] = resume
     ? [{ id: resume.checkpoint.branchId, source: input.id, target: resume.checkpoint.workNodeId, kind: 'forward' }]
-    : graph.edges.filter((e): e is Extract<GraphV4['edges'][number], { kind: 'forward' }> => e.kind === 'forward' && e.source === input.id);
+    : startNodeId
+      ? [{ id: `manual-${startNodeId}`, source: input.id, target: startNodeId, kind: 'forward' }]
+      : graph.edges.filter((e): e is Extract<GraphV4['edges'][number], { kind: 'forward' }> => e.kind === 'forward' && e.source === input.id);
 
   async function invoke(node: Extract<GraphV4['nodes'][number], { type: 'agent' | 'decision' }>, nodePrompt: string, iteration: number, policy: SessionPolicy) {
     if (++totalExec > graph.maxNodeExecutions) return { status: 'error' as const, error: `exceeded maxNodeExecutions ${graph.maxNodeExecutions}` };

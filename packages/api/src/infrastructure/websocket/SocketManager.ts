@@ -49,7 +49,7 @@ export type PublicGraphEvent =
       timestamp: number;
     }
   | { type: 'route_decided'; runId: string; branchId: string; nodeId: string; claim: CompletionClaim | null; decision: 'finish' | 'forward' | 'clarify'; reason: string; timestamp: number }
-  | { type: 'run_plan_created'; runId: string; lane: RouteLane; entryNodeId: string; gateNodeIds: string[]; rerouted: boolean; confidence: number; risk: Risk; reason: string; timestamp: number }
+  | { type: 'run_plan_created'; runId: string; lane: RouteLane; entryNodeId: string; gateNodeIds: string[]; rerouted: boolean; confidence: number; risk: Risk; reason: string; timestamp: number; source: 'router' | 'manual_entry' }
   | { type: 'branch_done'; runId: string; branchId: string; cause: 'early_complete' | 'needs_input' | 'end'; finalArtifact: string; timestamp: number }
   | { type: 'candidate_produced'; runId: string; branchId: string; gateId?: string; candidate: Candidate; timestamp: number }
   | { type: 'evaluation_done'; runId: string; branchId: string; gateId: string; decisionNodeId: string; evaluation: Evaluation; timestamp: number }

@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRouteDecision, validateRouteDecision, resolveCapabilityProfile, resolveLanePlan, routerPrompt, type RouteDecision, type RouteValidation } from './routing.js';
-import type { GraphV5 } from './graph.js';
+import { parseRouteDecision, validateRouteDecision, resolveCapabilityProfile, resolveLanePlan, resolveDownstreamPlan, normalizeRunEntry, routerPrompt, type RouteDecision, type RouteValidation } from './routing.js';
+import type { GraphV5, AnyGraph } from './graph.js';
 
 const rd = (lane: RouteDecision['lane'], over: Partial<RouteDecision> = {}): RouteDecision => ({
   schemaVersion: 1, lane, confidence: 0.9, risk: 'low', sideEffects: 'none', reason: 'r', missingRequirements: [], ...over,
@@ -155,5 +155,76 @@ describe('resolveLanePlan risk gating (isEdgeActive minRisk)', () => {
     const high = resolveLanePlan(plannedGraph(), rd('planned_change', { risk: 'high' }), false).gateNodeIds;
     assert.deepEqual(medium, ['gate-code']);
     assert.deepEqual(high, ['gate-code', 'gate-security']);
+  });
+});
+
+describe('resolveDownstreamPlan (manual entry from work node)', () => {
+  it('walks from a mid-lane node collecting gates + forward to End', () => {
+    const plan = resolveDownstreamPlan(plannedGraph(), 'implementer', 'planned_change', 'high');
+    assert.equal(plan.entryNodeId, 'implementer');
+    assert.deepEqual(plan.gateNodeIds, ['gate-code', 'gate-security']); // high → security 激活
+    assert.equal(plan.endNodeId, '__end__');
+  });
+
+  it('skips security gate at medium risk (isEdgeActive minRisk)', () => {
+    const plan = resolveDownstreamPlan(plannedGraph(), 'implementer', 'planned_change', 'medium');
+    assert.deepEqual(plan.gateNodeIds, ['gate-code']);
+  });
+});
+
+describe('normalizeRunEntry (RunEntry validation)', () => {
+  const v3: AnyGraph = { schemaVersion: 3, inputNode: '__input__', maxNodeExecutions: 50, nodes: [{ id: '__input__', type: 'input' }, { id: 'w', type: 'agent', agentNodeKey: 'opencode:x' }], edges: [{ id: 'e', source: '__input__', target: 'w' }] };
+
+  it('absent → {kind:input} (default, backward compatible)', () => {
+    const r1 = normalizeRunEntry(null, v5Graph());
+    assert.equal('entry' in r1, true);
+    if ('entry' in r1) assert.deepEqual(r1.entry, { kind: 'input' });
+    const r2 = normalizeRunEntry(undefined, v5Graph());
+    assert.equal('entry' in r2, true);
+    if ('entry' in r2) assert.deepEqual(r2.entry, { kind: 'input' });
+  });
+
+  it('work node_only accepts an agent node', () => {
+    const r = normalizeRunEntry({ kind: 'work', nodeId: 'implementer', mode: 'node_only' }, v5Graph());
+    assert.equal('entry' in r, true);
+  });
+
+  it('rejects non-agent entry node (decision)', () => {
+    const r = normalizeRunEntry({ kind: 'work', nodeId: 'code-review', mode: 'node_only' }, v5Graph()) as { error: string };
+    assert.match(r.error, /agent work node/);
+  });
+
+  it('rejects downstream on V3 (no gate/forward concept)', () => {
+    const r = normalizeRunEntry({ kind: 'work', nodeId: 'w', mode: 'downstream' }, v3) as { error: string };
+    assert.match(r.error, /V4 or V5/);
+  });
+
+  it('V5 single-lane node auto-derives lane; write lane defaults risk high', () => {
+    // v5Graph() implementer 只在 small_change lane
+    const r = normalizeRunEntry({ kind: 'work', nodeId: 'implementer', mode: 'downstream' }, v5Graph());
+    assert.equal('entry' in r, true);
+    if ('entry' in r) {
+      assert.equal((r.entry as { lane?: string }).lane, 'small_change');
+      assert.equal((r.entry as { risk?: string }).risk, 'high');
+    }
+  });
+
+  it('V5 multi-lane node requires explicit lane (plannedGraph implementer)', () => {
+    const r = normalizeRunEntry({ kind: 'work', nodeId: 'implementer', mode: 'downstream' }, plannedGraph()) as { error: string };
+    assert.match(r.error, /lane.*required/);
+    const r2 = normalizeRunEntry({ kind: 'work', nodeId: 'implementer', mode: 'downstream', lane: 'small_change' }, plannedGraph());
+    assert.equal('entry' in r2, true);
+  });
+
+  it('rejects lane not including the node', () => {
+    const r = normalizeRunEntry({ kind: 'work', nodeId: 'implementer', mode: 'downstream', lane: 'investigate' }, v5Graph()) as { error: string };
+    assert.match(r.error, /does not include node/);
+  });
+
+  it('validates artifactRef shape', () => {
+    const r = normalizeRunEntry({ kind: 'work', nodeId: 'implementer', mode: 'node_only', artifactRef: { runId: 'r1', source: { kind: 'run_final' }, sha256: 'abc' } }, v5Graph());
+    assert.equal('entry' in r, true);
+    const bad = normalizeRunEntry({ kind: 'work', nodeId: 'implementer', mode: 'node_only', artifactRef: { runId: 'r1', source: { kind: 'bogus' } } }, v5Graph()) as { error: string };
+    assert.match(bad.error, /artifactRef/);
   });
 });

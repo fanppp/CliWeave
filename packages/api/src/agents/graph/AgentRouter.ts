@@ -23,7 +23,7 @@ import { AUTO_ROUTE_INSTRUCTION, extractCompletion, type RunMode } from './compl
 import type { PublicGraphEvent, PersistedRunEvent } from '../../infrastructure/websocket/SocketManager.js';
 import { walkEvaluatorOptimizerGraph } from './EvaluatorOptimizerRouter.js';
 import { walkV5Graph } from './V5Router.js';
-import type { IntentMode } from './routing.js';
+import type { IntentMode, RunEntry } from './routing.js';
 import type { Rubric } from './evaluation.js';
 
 export interface ExecuteOptions {
@@ -41,6 +41,10 @@ export interface ExecuteOptions {
   gatePolicyOverrides?: Record<string, ExhaustedPolicy>;
   /** V4 run_meta 中冻结的 rubric 快照。运行和恢复都必须使用它，禁止中途重读可变文件。 */
   rubrics?: Record<string, { rubricRef: string; hash: string; rubric: Rubric }>;
+  /** #12 RunEntry：缺省/ {kind:'input'} 走整图；{kind:'work'} 从指定 work 节点启动。 */
+  entry?: import('./routing.js').RunEntry;
+  /** entry.artifactRef 预解析出的产物内容（/start 解析+SHA-256 校验后写入；runner 把它作为入口节点输入）。 */
+  entryArtifact?: string;
 }
 
 /** 节点执行上下文（第 4 参，测试 wrapper 必须透传，不依赖少参数赋值）。 */
@@ -404,6 +408,16 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
 }
 
 export async function executeGraph(prompt: string, graph: AnyGraph, opts: ExecuteOptions): Promise<void> {
+  const entry = opts.entry;
+  // #12 RunEntry：默认/ {kind:'input'} 走整图；{kind:'work'} 从指定 agent 节点手工启动。
+  if (entry && entry.kind === 'work') {
+    const entryPrompt = opts.entryArtifact ?? prompt;
+    if (entry.mode === 'node_only') return runNodeOnly(entryPrompt, graph, opts, entry);
+    // downstream：V3 无 gate/forward 概念，拒绝。
+    if (graph.schemaVersion === 3) { opts.emit({ type: 'node_error', runId: opts.runId, nodeId: entry.nodeId, error: 'downstream entry requires a V4 or V5 graph' }); opts.emit({ type: 'run_error', runId: opts.runId, error: 'downstream entry requires a V4 or V5 graph' }); return; }
+    if (graph.schemaVersion === 4) return walkEvaluatorOptimizerGraph(entryPrompt, graph, opts, runAgentNode, undefined, entry.nodeId);
+    return walkV5Graph(entryPrompt, graph, opts, runAgentNode, 'auto', undefined, undefined, { kind: 'manual_downstream', entry });
+  }
   if (graph.schemaVersion === 5) {
     const intentMode: IntentMode = (opts.runMode ?? 'full') === 'auto' ? 'auto' : 'change';
     return walkV5Graph(prompt, graph, opts, runAgentNode, intentMode);
@@ -411,4 +425,28 @@ export async function executeGraph(prompt: string, graph: AnyGraph, opts: Execut
   return graph.schemaVersion === 4
     ? walkEvaluatorOptimizerGraph(prompt, graph, opts, runAgentNode)
     : walkGraph(prompt, graph, opts, runAgentNode);
+}
+
+/**
+ * #12 node_only：选中 agent 节点 fresh session 执行一次，不跑 gate、不跑下游。V3/V4/V5 共用。
+ * 入口节点输入 = opts.entryArtifact（artifactRef 预解析）?? prompt（当前 message）。
+ */
+export async function runNodeOnly(prompt: string, graph: AnyGraph, opts: ExecuteOptions, entry: Extract<RunEntry, { kind: 'work' }>, exec: ExecNode = runAgentNode): Promise<void> {
+  const { runId, emit, record, signal } = opts;
+  const emitBoth = (e: PublicGraphEvent): void => { emit(e); record?.(e); };
+  let finished = false;
+  const finish = (e: PublicGraphEvent): void => { if (!finished) { finished = true; emitBoth(e); } };
+  const node = graph.nodes.find((n) => n.id === entry.nodeId);
+  if (!node || node.type !== 'agent') { finish({ type: 'run_error', runId, error: `entry node '${entry.nodeId}' is not an agent work node` }); return; }
+  const agentNode = node as GraphAgentNode;
+  const instanceKey = formatInstanceKey(opts.projectId, agentNode.agentNodeKey);
+  emitBoth({ type: 'node_started', runId, nodeId: node.id, instanceKey });
+  if (signal?.aborted) { finish({ type: 'run_aborted', runId }); return; }
+  const outcome = await exec(agentNode, (opts.contextPrefix ?? '') + prompt, opts, { iteration: 1, sessionPolicy: { mode: 'fresh', persistActive: false } });
+  if (outcome.status === 'aborted') { finish({ type: 'run_aborted', runId }); return; }
+  if (outcome.status !== 'ok') { finish({ type: 'run_error', runId, error: outcome.error ?? `node '${node.id}' failed` }); return; }
+  const text = outcome.finalText ?? '';
+  emitBoth({ type: 'node_message', runId, nodeId: node.id, message: { type: 'text', nodeId: node.id, content: text, timestamp: ts() } as AgentMessage, instanceKey });
+  emitBoth({ type: 'node_done', runId, nodeId: node.id, instanceKey });
+  finish({ type: 'run_done', runId, finalText: text, termination: 'completed' });
 }

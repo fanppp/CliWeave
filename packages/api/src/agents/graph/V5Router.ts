@@ -19,7 +19,7 @@ import type { GraphV5, GraphV5Edge } from './graph.js';
 import { isEdgeActive } from './graph.js';
 import type { ExecNode, ExecuteOptions } from './AgentRouter.js';
 import type { PublicGraphEvent, RunQuality } from '../../infrastructure/websocket/SocketManager.js';
-import { routerPrompt, parseRouteDecision, validateRouteDecision, resolveLanePlan, type IntentMode, type RouteDecision, type RunPlan } from './routing.js';
+import { routerPrompt, parseRouteDecision, validateRouteDecision, resolveLanePlan, resolveDownstreamPlan, type IntentMode, type RouteDecision, type RunPlan, type RunEntry } from './routing.js';
 import { evaluatorPrompt, extractEvaluation, readDecisionRubric, revisionPrompt, selectBest, type Candidate, type Evaluation } from './evaluation.js';
 import type { ExhaustedPolicy } from './graph.js';
 import { hashToken, TOKEN_TTL_MS, type V5GateCheckpoint, type V5ClarifyCheckpoint, type ResumeAction } from './checkpoint.js';
@@ -28,7 +28,7 @@ const LOW_CONFIDENCE = 0.5;
 
 type LaneResult = { status: 'completed' | 'best_effort'; output: string; termination?: 'completed' | 'best_effort'; quality: RunQuality } | { status: 'error'; error: string } | { status: 'aborted' } | { status: 'paused' };
 
-export async function walkV5Graph(prompt: string, graph: GraphV5, opts: ExecuteOptions, exec: ExecNode, intentMode: IntentMode, resume?: { checkpoint: V5GateCheckpoint; action: ResumeAction }, clarifyResume?: { checkpoint: V5ClarifyCheckpoint; userResponse: string }): Promise<void> {
+export async function walkV5Graph(prompt: string, graph: GraphV5, opts: ExecuteOptions, exec: ExecNode, intentMode: IntentMode, resume?: { checkpoint: V5GateCheckpoint; action: ResumeAction }, clarifyResume?: { checkpoint: V5ClarifyCheckpoint; userResponse: string }, manualDownstream?: { kind: 'manual_downstream'; entry: Extract<RunEntry, { kind: 'work' }> }): Promise<void> {
   const { runId, projectId, emit, record, signal } = opts;
   const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
   let totalExec = 0;
@@ -56,7 +56,7 @@ export async function walkV5Graph(prompt: string, graph: GraphV5, opts: ExecuteO
 
   const input = byId.get(graph.inputNode);
   if (!input || input.type !== 'input') { finish({ type: 'run_error', runId, error: 'invalid V5 input node' }); return; }
-  if (!resume && !clarifyResume) {
+  if (!resume && !clarifyResume && !manualDownstream) {
     emitBoth({ type: 'node_started', runId, nodeId: input.id });
     emitBoth({ type: 'node_message', runId, nodeId: input.id, message: { type: 'text', nodeId: input.id, content: prompt, timestamp: Date.now() } as AgentMessage });
     emitBoth({ type: 'node_done', runId, nodeId: input.id });
@@ -93,8 +93,28 @@ export async function walkV5Graph(prompt: string, graph: GraphV5, opts: ExecuteO
     let plan: RunPlan;
     try { plan = resolveLanePlan(graph, rd, false); }
     catch (e) { finish({ type: 'run_error', runId, error: (e as Error).message }); return; }
-    emitBoth({ type: 'run_plan_created', runId, lane: plan.lane, entryNodeId: plan.entryNodeId, gateNodeIds: plan.gateNodeIds, rerouted: false, confidence: rd.confidence, risk: rd.risk, reason: rd.reason, timestamp: Date.now() });
+    emitBoth({ type: 'run_plan_created', runId, lane: plan.lane, entryNodeId: plan.entryNodeId, gateNodeIds: plan.gateNodeIds, rerouted: false, confidence: rd.confidence, risk: rd.risk, reason: rd.reason, timestamp: Date.now(), source: 'router' });
     emitBoth({ type: 'route_decided', runId, branchId: 'main', nodeId: routerNode.id, claim: null, decision: 'forward', reason: `lane=${plan.lane}; ${rd.reason}`, timestamp: Date.now() });
+    const result = await walkLane(graph, plan, prompt, opts, exec, invoke, byId, signal);
+    if (result.status === 'aborted') { finish({ type: 'run_aborted', runId }); return; }
+    if (result.status === 'paused') return;
+    if (result.status === 'error') { finish({ type: 'run_error', runId, error: result.error }); return; }
+    finish({ type: 'run_done', runId, finalText: result.output, termination: result.termination ?? 'completed', quality: result.quality });
+    return;
+  }
+
+  // manual downstream（#12）：跳过 input/Router，从指定 work 节点沿 forward 链跑 gate+下游。
+  if (manualDownstream) {
+    const entry = manualDownstream.entry;
+    const lane = entry.lane; // /run 已校验：V5 downstream 多 lane 须显式传，唯一 lane 已推导
+    if (!lane) { finish({ type: 'run_error', runId, error: 'V5 manual downstream requires a lane (normalize failed)' }); return; }
+    const risk = entry.risk ?? 'high'; // 手工进入写通道默认 high
+    let plan: RunPlan;
+    try { plan = resolveDownstreamPlan(graph, entry.nodeId, lane, risk); }
+    catch (e) { finish({ type: 'run_error', runId, error: (e as Error).message }); return; }
+    const routerNode = graph.nodes.find((n) => n.type === 'router');
+    emitBoth({ type: 'run_plan_created', runId, lane: plan.lane, entryNodeId: plan.entryNodeId, gateNodeIds: plan.gateNodeIds, rerouted: false, confidence: 1, risk, reason: 'manual downstream entry', timestamp: Date.now(), source: 'manual_entry' });
+    emitBoth({ type: 'route_decided', runId, branchId: 'main', nodeId: routerNode?.id ?? entry.nodeId, claim: null, decision: 'forward', reason: `manual downstream lane=${lane}`, timestamp: Date.now() });
     const result = await walkLane(graph, plan, prompt, opts, exec, invoke, byId, signal);
     if (result.status === 'aborted') { finish({ type: 'run_aborted', runId }); return; }
     if (result.status === 'paused') return;
@@ -158,7 +178,7 @@ export async function walkV5Graph(prompt: string, graph: GraphV5, opts: ExecuteO
   let plan: RunPlan;
   try { plan = resolveLanePlan(graph, finalRd, rerouted); }
   catch (e) { finish({ type: 'run_error', runId, error: (e as Error).message }); return; }
-  emitBoth({ type: 'run_plan_created', runId, lane: plan.lane, entryNodeId: plan.entryNodeId, gateNodeIds: plan.gateNodeIds, rerouted, confidence: finalRd.confidence, risk: finalRd.risk, reason: finalRd.reason, timestamp: Date.now() });
+  emitBoth({ type: 'run_plan_created', runId, lane: plan.lane, entryNodeId: plan.entryNodeId, gateNodeIds: plan.gateNodeIds, rerouted, confidence: finalRd.confidence, risk: finalRd.risk, reason: finalRd.reason, timestamp: Date.now(), source: 'router' });
   emitBoth({ type: 'route_decided', runId, branchId: 'main', nodeId: router.id, claim: null, decision: 'forward', reason: `lane=${plan.lane}; ${finalRd.reason}`, timestamp: Date.now() });
 
   // 5. walk lane

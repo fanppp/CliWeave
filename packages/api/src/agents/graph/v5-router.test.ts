@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { walkV5Graph, resumeV5Graph, resumeV5Clarify } from './V5Router.js';
+import { runNodeOnly } from './AgentRouter.js';
 import { parseDurableCheckpoint, isV5GateCheckpoint, type V5GateCheckpoint, type V5ClarifyCheckpoint } from './checkpoint.js';
 import { getDefaultV5ProjectGraph } from './v5-workspace.js';
 import type { ExecNode, ExecuteOptions } from './AgentRouter.js';
@@ -295,5 +296,46 @@ describe('V5 durable clarify pause/resume', () => {
     assert.equal(publicEvents.some((e) => e.type === 'run_paused'), false);
     const done = publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_done' }> => e.type === 'run_done');
     assert.equal(done?.termination, 'needs_input');
+  });
+});
+
+describe('V5 RunEntry (manual node entry)', () => {
+  function optsFor(events: { publicEvents: PublicGraphEvent[]; persisted: PersistedRunEvent[] }, over: Partial<ExecuteOptions> = {}): ExecuteOptions {
+    const rubrics = Object.fromEntries(v5Graph().nodes.filter((n) => n.type === 'decision').map((n) => [n.id, { rubricRef: n.rubricRef!, hash: 'test', rubric }] as const));
+    return { runId: 'run-v5e', projectId: 'test-project', emit: (e) => events.publicEvents.push(e), record: (e) => events.persisted.push(e), rubrics, ...over };
+  }
+
+  it('node_only invokes the single work node once, no gates/downstream, run_done(completed)', async () => {
+    const scripted = v5Exec([], {}, { implementer: ['impl-only-artifact'] });
+    const ev: { publicEvents: PublicGraphEvent[]; persisted: PersistedRunEvent[] } = { publicEvents: [], persisted: [] };
+    await runNodeOnly('do task', v5Graph(), optsFor(ev), { kind: 'work', nodeId: 'implementer', mode: 'node_only' }, scripted.exec);
+    assert.ok(scripted.calls.some((c) => c.nodeId === 'implementer'));
+    assert.equal(scripted.calls.some((c) => c.nodeId === 'code-review'), false); // 不跑 gate
+    const done = ev.publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_done' }> => e.type === 'run_done');
+    assert.equal(done?.termination, 'completed');
+    assert.equal(done?.finalText, 'impl-only-artifact');
+  });
+
+  it('node_only uses entryArtifact as node input when provided (executeGraph passes it as prompt)', async () => {
+    let captured = '';
+    const exec: ExecNode = async (node, prompt) => { captured = prompt; return { status: 'ok', finalText: 'out', sessionId: 's' }; };
+    const ev: { publicEvents: PublicGraphEvent[]; persisted: PersistedRunEvent[] } = { publicEvents: [], persisted: [] };
+    // executeGraph 把 opts.entryArtifact 解析后作为 runNodeOnly 的 prompt 传入
+    await runNodeOnly('PRECOMPUTED-ARTIFACT', v5Graph(), optsFor(ev), { kind: 'work', nodeId: 'implementer', mode: 'node_only' }, exec);
+    assert.ok(captured.includes('PRECOMPUTED-ARTIFACT'));
+  });
+
+  it('manual downstream emits run_plan_created source:manual_entry + runs gates from the node', async () => {
+    const scripted = v5Exec([], { 'code-review': ['approve'] }, { implementer: ['impl-artifact'] });
+    const ev: { publicEvents: PublicGraphEvent[]; persisted: PersistedRunEvent[] } = { publicEvents: [], persisted: [] };
+    const entry = { kind: 'work' as const, nodeId: 'implementer', mode: 'downstream' as const, lane: 'small_change' as const, risk: 'medium' as const };
+    await walkV5Graph('do task', v5Graph(), optsFor(ev), scripted.exec, 'auto', undefined, undefined, { kind: 'manual_downstream', entry });
+    const plan = ev.publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_plan_created' }> => e.type === 'run_plan_created');
+    assert.equal(plan?.source, 'manual_entry');
+    assert.equal(plan?.entryNodeId, 'implementer');
+    assert.deepEqual(plan?.gateNodeIds, ['gate-code']);
+    assert.ok(scripted.calls.some((c) => c.nodeId === 'code-review')); // gate 跑了
+    const done = ev.publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_done' }> => e.type === 'run_done');
+    assert.equal(done?.termination, 'completed');
   });
 });

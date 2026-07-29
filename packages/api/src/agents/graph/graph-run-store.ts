@@ -6,6 +6,7 @@
  * - recordRunEvent 防御性净化：若事件含原始 resumeToken → 抛错（M8 run_paused 须发 hash 形到 record）。
  */
 import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, type WriteStream } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { getProjectRoot } from '../../utils/project-root.js';
 import { formatInstanceKey } from '../instance-key.js';
@@ -15,6 +16,7 @@ import type { ContextSnapshot } from '../context-builder.js';
 import type { Rubric } from './evaluation.js';
 import type { AnyGraph } from './graph.js';
 import type { RunMode } from './completion.js';
+import type { RunEntry } from './routing.js';
 
 function runFile(projectId: string, runId: string): string {
   return join(projectRunsDir(projectId), `${runId}.jsonl`);
@@ -39,6 +41,10 @@ export interface RunMeta {
   runMode?: RunMode;
   rubrics?: Record<string, { rubricRef: string; hash: string; rubric: Rubric }>;
   gatePolicyOverrides?: Record<string, 'ask_user' | 'continue_best' | 'fail'>;
+  /** #12 RunEntry：规范化后的入口（缺省 {kind:'input'}；work=node_only/downstream）。不可变。 */
+  entry?: RunEntry;
+  /** #12 entry.artifactRef 预解析产物内容（服务端 SHA-256 校验后快照，不可变）。 */
+  entryArtifact?: string;
 }
 
 export interface RunSummary {
@@ -101,6 +107,8 @@ export function recordRunStart(
   runMode?: RunMode,
   rubrics?: RunMeta['rubrics'],
   gatePolicyOverrides?: RunMeta['gatePolicyOverrides'],
+  entry?: RunEntry,
+  entryArtifact?: string,
 ): void {
   const meta: RunMeta = {
     type: 'run_meta',
@@ -117,6 +125,8 @@ export function recordRunStart(
     ...(runMode ? { runMode } : {}),
     ...(rubrics ? { rubrics } : {}),
     ...(gatePolicyOverrides && Object.keys(gatePolicyOverrides).length ? { gatePolicyOverrides } : {}),
+    ...(entry ? { entry } : {}),
+    ...(entryArtifact != null ? { entryArtifact } : {}),
   };
   getStream(projectId, runId).write(JSON.stringify(meta) + '\n');
 }
@@ -174,6 +184,29 @@ export function readRun(projectId: string, runId: string): { meta?: RunMeta; eve
 /** 服务端恢复专用：包含内部 checkpoint，禁止直接返回 HTTP/WS。 */
 export function readPersistedRun(projectId: string, runId: string): { meta?: RunMeta; events: PersistedRunEvent[] } {
   return readJsonl(runFile(projectId, runId));
+}
+
+/**
+ * #12 解析 entry.artifactRef：只读同项目历史 run 的 finalText 或某 candidate 的 artifact，SHA-256 校验。
+ * 跨项目引用由调用方保证（runId 属同 projectId）；此处只校验存在性 + hash。
+ */
+export function resolveArtifactRef(projectId: string, ref: { runId: string; source: { kind: 'run_final' } | { kind: 'candidate'; candidateId: string }; sha256: string }): { artifact: string } | { error: string } {
+  const { meta, events } = readPersistedRun(projectId, ref.runId);
+  if (!meta) return { error: `artifact run '${ref.runId}' not found in this project` };
+  let artifact: string | undefined;
+  if (ref.source.kind === 'run_final') {
+    const done = [...events].reverse().find((e): e is Extract<PersistedRunEvent, { type: 'run_done' }> => e.type === 'run_done');
+    artifact = done?.finalText;
+  } else {
+    const cid = ref.source.candidateId;
+    const cp = events.find((e): e is Extract<PersistedRunEvent, { type: 'candidate_produced' }> =>
+      e.type === 'candidate_produced' && (e as { candidate?: { id?: string } }).candidate?.id === cid);
+    artifact = (cp as { candidate?: { artifact?: string } } | undefined)?.candidate?.artifact;
+  }
+  if (artifact == null) return { error: 'referenced artifact not found in run' };
+  const hash = createHash('sha256').update(artifact).digest('hex');
+  if (hash !== ref.sha256) return { error: 'artifact sha256 mismatch (artifact changed since reference)' };
+  return { artifact };
 }
 
 /** 列出某画布最近 N 次 run（按 createdAt 降序）。status 从末尾事件推断。 */

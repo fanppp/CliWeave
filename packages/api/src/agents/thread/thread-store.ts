@@ -79,6 +79,8 @@ export interface PendingRun {
   threadRevision: number;
   runMode: 'auto' | 'full' | 'quick';
   gatePolicyOverrides?: Record<string, 'ask_user' | 'continue_best' | 'fail'>;
+  /** #12 RunEntry：规范化后的入口（缺省 {kind:'input'}；create↔start 之间重启不丢）。 */
+  entry?: import('../graph/routing.js').RunEntry;
   createdAt: number;
 }
 

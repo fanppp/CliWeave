@@ -61,7 +61,9 @@ import {
   readPersistedRun,
   recordRunEvent,
   recordRunStart,
+  resolveArtifactRef,
 } from '../agents/graph/graph-run-store.js';
+import { normalizeRunEntry } from '../agents/graph/routing.js';
 import {
   createThread,
   readThread,
@@ -691,6 +693,7 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
       expectedThreadRevision?: unknown;
       runMode?: unknown;
       gatePolicyOverrides?: unknown;
+      entry?: unknown;
     };
     const message =
       typeof body.message === 'string' ? body.message : typeof body.prompt === 'string' ? body.prompt : '';
@@ -714,6 +717,17 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
     } catch (err) {
       return reply.code(404).send({ error: (err as Error).message });
     }
+
+    // #12 RunEntry：规范化（节点须是 agent、downstream 拒 V3、V5 多 lane 须显式、写通道 risk 默认 high）。
+    let graph: AnyGraph;
+    try {
+      graph = readProjectGraph(projectId);
+    } catch (err) {
+      return reply.code(400).send({ error: `graph not readable: ${(err as Error).message}` });
+    }
+    const entryResult = normalizeRunEntry(body.entry, graph);
+    if ('error' in entryResult) return reply.code(400).send({ error: entryResult.error });
+    const runEntry = entryResult.entry;
 
     // 解析/创建 Thread（新对话省略 threadId；继续对话须 threadId + expectedThreadRevision）
     let threadId: string;
@@ -745,6 +759,7 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
         threadRevision: turn.revision,
         runMode,
         ...(Object.keys(gatePolicyOverrides).length ? { gatePolicyOverrides } : {}),
+        ...(runEntry.kind === 'work' ? { entry: runEntry } : {}),
         createdAt: Date.now(),
       });
       registerRun({
@@ -804,7 +819,18 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
         return reply.code(400).send({ error: msg });
       }
 
-      const { prompt, threadId, turnId, threadRevision, runMode = 'full', gatePolicyOverrides = {} } = pending;
+      const { prompt, threadId, turnId, threadRevision, runMode = 'full', gatePolicyOverrides = {}, entry: runEntry } = pending;
+      // #12 entry.artifactRef 解析：同项目历史 run + SHA-256 校验 → entryArtifact（不可变快照入 run_meta）。
+      let entryArtifact: string | undefined;
+      if (runEntry?.kind === 'work' && runEntry.artifactRef) {
+        const resolved = resolveArtifactRef(projectId, runEntry.artifactRef);
+        if ('error' in resolved) {
+          await failTurn(projectId, threadId, runId, turnId, { status: 'error', reason: resolved.error });
+          deletePendingRun(projectId, runId); transitionRunStatus(runId, 'error');
+          return reply.code(400).send({ error: resolved.error });
+        }
+        entryArtifact = resolved.artifact;
+      }
       if (graph.schemaVersion === 4) {
         const gateIds = new Set(graph.edges.filter((e) => e.kind === 'gate').map((e) => e.id));
         const unknown = Object.keys(gatePolicyOverrides).find((id) => !gateIds.has(id));
@@ -838,6 +864,8 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
         runMode,
         rubrics,
         gatePolicyOverrides,
+        runEntry,
+        entryArtifact,
       );
       reply.code(202).send({ status: 'started', runId });
 
@@ -850,6 +878,8 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
           runMode,
           gatePolicyOverrides,
           rubrics,
+          ...(runEntry ? { entry: runEntry } : {}),
+          ...(entryArtifact != null ? { entryArtifact } : {}),
           emit: (event) => {
             socketManager.broadcastGraph(event);
             // 先广播图终态；Thread durable commit 在 executeGraph resolve 后顺序执行。

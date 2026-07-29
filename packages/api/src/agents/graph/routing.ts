@@ -10,7 +10,7 @@
  * 本模块只含纯逻辑（可单测）；Router/Investigator 的实际 CLI 调用由 V5 runner 编排。
  */
 import { z } from 'zod';
-import type { GraphV5, RouteLane, Risk } from './graph.js';
+import type { GraphV5, RouteLane, Risk, AnyGraph } from './graph.js';
 import { isEdgeActive } from './graph.js';
 
 export type IntentMode = 'auto' | 'answer' | 'inspect' | 'change';
@@ -22,7 +22,30 @@ export interface CreateRunRequest {
   message: string;
   intentMode: IntentMode;
   gatePolicyOverrides?: Record<string, 'ask_user' | 'continue_best' | 'fail'>;
+  /** #12 RunEntry：默认 {kind:'input'} 走整图；{kind:'work'} 从指定 work 节点启动。 */
+  entry?: RunEntry;
 }
+
+/** 历史产物引用：只读同项目历史 run 的 finalText 或某 candidate 的 artifact，服务端 SHA-256 校验。 */
+export interface ArtifactRef {
+  runId: string;
+  source: { kind: 'run_final' } | { kind: 'candidate'; candidateId: string };
+  sha256: string;
+}
+
+/** RunEntry：input=整图从 input 节点跑；work=从指定 agent 节点手工启动。 */
+export type RunEntry =
+  | { kind: 'input' }
+  | {
+      kind: 'work';
+      nodeId: string;
+      mode: 'node_only' | 'downstream';
+      /** V5 多 lane 节点须显式传；唯一 lane 自动推导（normalize 阶段填充）。 */
+      lane?: RouteLane;
+      /** 写通道手工进入默认 high（normalize 阶段填充）；用户显式降低须写 run_meta。 */
+      risk?: Risk;
+      artifactRef?: ArtifactRef;
+    };
 
 /** Router 输出契约（schemaVersion 1）。 */
 export interface RouteDecision {
@@ -172,5 +195,104 @@ export function resolveLanePlan(graph: GraphV5, rd: RouteDecision, rerouted: boo
   };
 }
 
+/**
+ * #12 手工 downstream 入口：从指定 work 节点起，沿 forward 链走到 End，收集路径上 gate（按 order，isEdgeActive 过滤 lanes+minRisk）。
+ * 与 resolveLanePlan 的区别：不从 route 边找 lane 入口，直接从用户指定节点起（用于 mid-lane 手工续跑）。
+ */
+export function resolveDownstreamPlan(graph: GraphV5, nodeId: string, lane: RouteLane, risk: Risk): RunPlan {
+  const forward = graph.edges.filter((e): e is Extract<GraphV5Edge, { kind: 'forward' }> => e.kind === 'forward');
+  const activeForward = (from: string): Extract<GraphV5Edge, { kind: 'forward' }> | undefined =>
+    forward.find((e) => e.source === from && isEdgeActive(e, lane, risk));
+  const gateNodeIds: string[] = [];
+  let cur: string | undefined = nodeId;
+  let endNodeId: string | undefined;
+  const seen = new Set<string>();
+  while (cur) {
+    if (seen.has(cur)) break;
+    seen.add(cur);
+    const node = graph.nodes.find((n) => n.id === cur);
+    if (!node) break;
+    if (node.type === 'end') { endNodeId = node.id; break; }
+    if (node.type === 'agent') {
+      const gates = graph.edges
+        .filter((e): e is Extract<GraphV5Edge, { kind: 'gate' }> => e.kind === 'gate' && e.source === node.id && isEdgeActive(e, lane, risk))
+        .sort((a, b) => a.order - b.order);
+      for (const g of gates) gateNodeIds.push(g.id);
+    }
+    cur = activeForward(cur)?.target;
+  }
+  const rd: RouteDecision = { schemaVersion: 1, lane, confidence: 1, risk, sideEffects: 'project_write', reason: 'manual downstream entry', missingRequirements: [] };
+  return {
+    lane,
+    entryNodeId: nodeId,
+    ...(endNodeId ? { endNodeId } : {}),
+    gateNodeIds,
+    profile: resolveCapabilityProfile(lane, risk),
+    routeDecision: rd,
+    rerouted: false,
+  };
+}
+
 // 局部类型别名，避免在函数签名里重复内联 Extract。
 type GraphV5Edge = import('./graph.js').GraphV5Edge;
+
+const WRITE_LANES_SET: ReadonlySet<RouteLane> = new Set<RouteLane>(['small_change', 'planned_change']);
+
+/**
+ * #12 规范化 RunEntry（/run 阶段，图已加载）：
+ * - 缺省/ {kind:'input'} 走整图。
+ * - work：nodeId 必须是 agent 节点（拒 router/decision/end/knowledge/documenter）。
+ * - downstream 拒 V3（无 gate/forward 概念）。
+ * - V5 多 lane 节点须显式传 lane；唯一 lane 自动推导。写通道 risk 缺省 high。
+ * - artifactRef 只校验形状（runId/source/sha256）；跨项目 + SHA-256 在 /start resolveArtifactRef 校验。
+ */
+export function normalizeRunEntry(raw: unknown, graph: AnyGraph): { entry: RunEntry } | { error: string } {
+  if (raw == null) return { entry: { kind: 'input' } };
+  if (typeof raw !== 'object' || raw === null) return { error: 'entry must be an object' };
+  const r = raw as Record<string, unknown>;
+  if (r.kind === 'input') return { entry: { kind: 'input' } };
+  if (r.kind !== 'work') return { error: "entry.kind must be 'input' or 'work'" };
+  if (typeof r.nodeId !== 'string' || r.nodeId.length === 0) return { error: 'entry.nodeId is required' };
+  if (r.mode !== 'node_only' && r.mode !== 'downstream') return { error: "entry.mode must be 'node_only' or 'downstream'" };
+  const node = graph.nodes.find((n) => n.id === r.nodeId);
+  if (!node) return { error: `entry node '${r.nodeId}' not found in graph` };
+  if (node.type !== 'agent') return { error: `entry node '${r.nodeId}' must be an agent work node (got ${node.type})` };
+  if (r.mode === 'downstream' && graph.schemaVersion === 3) return { error: 'downstream entry requires a V4 or V5 graph' };
+  const mode = r.mode;
+  let lane: RouteLane | undefined;
+  let risk: Risk | undefined;
+  if (graph.schemaVersion === 5) {
+    const lanes = new Set<RouteLane>();
+    for (const e of graph.edges) {
+      if (e.kind === 'route' && e.target === r.nodeId) for (const l of e.lanes) lanes.add(l);
+      if ((e.kind === 'forward' || e.kind === 'gate') && e.source === r.nodeId && e.lanes) for (const l of e.lanes) lanes.add(l);
+    }
+    if (mode === 'downstream') {
+      if (typeof r.lane === 'string') {
+        if (!lanes.has(r.lane as RouteLane)) return { error: `entry lane '${r.lane}' does not include node '${r.nodeId}'` };
+        lane = r.lane as RouteLane;
+      } else if (lanes.size === 1) {
+        lane = [...lanes][0];
+      } else {
+        return { error: `node '${r.nodeId}' belongs to ${lanes.size} lanes; entry.lane is required` };
+      }
+    }
+    if (lane && WRITE_LANES_SET.has(lane)) {
+      risk = typeof r.risk === 'string' ? r.risk as Risk : 'high';
+    } else if (typeof r.risk === 'string') {
+      risk = r.risk as Risk;
+    }
+  }
+  let artifactRef: ArtifactRef | undefined;
+  if (r.artifactRef != null) {
+    if (typeof r.artifactRef !== 'object' || r.artifactRef === null) return { error: 'entry.artifactRef must be an object' };
+    const ar = r.artifactRef as Record<string, unknown>;
+    if (typeof ar.runId !== 'string' || typeof ar.sha256 !== 'string' || typeof ar.source !== 'object' || ar.source === null) return { error: 'entry.artifactRef requires runId, source, sha256' };
+    const src = ar.source as Record<string, unknown>;
+    if (src.kind === 'run_final') artifactRef = { runId: ar.runId, source: { kind: 'run_final' }, sha256: ar.sha256 };
+    else if (src.kind === 'candidate' && typeof src.candidateId === 'string') artifactRef = { runId: ar.runId, source: { kind: 'candidate', candidateId: src.candidateId }, sha256: ar.sha256 };
+    else return { error: "entry.artifactRef.source must be {kind:'run_final'} or {kind:'candidate',candidateId}" };
+  }
+  const entry: Extract<RunEntry, { kind: 'work' }> = { kind: 'work', nodeId: r.nodeId, mode, ...(lane ? { lane } : {}), ...(risk ? { risk } : {}), ...(artifactRef ? { artifactRef } : {}) };
+  return { entry };
+}
