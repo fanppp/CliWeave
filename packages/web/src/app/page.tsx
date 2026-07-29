@@ -11,6 +11,7 @@ import { NodeSelector } from '@/components/NodeSelector';
 import { ProjectPicker } from '@/components/ProjectPicker';
 import { RunPicker } from '@/components/RunPicker';
 import { SessionPicker } from '@/components/SessionPicker';
+import { IssuesPanel } from '@/components/IssuesPanel';
 import { HSplit, VSplit } from '@/components/Splitter';
 import { useSocket } from '@/hooks/useSocket';
 import { useNodeHistory } from '@/hooks/useNodeHistory';
@@ -173,7 +174,7 @@ function GraphSideBottom() {
   const selected = useGraphRunStore((s) => s.selectedAgentNodeKey);
   const setSelected = useGraphRunStore((s) => s.setSelectedAgentNodeKey);
   const graph = useGraphRunStore((s) => s.graph);
-  const [tab, setTab] = useState<'history' | 'config'>('history');
+  const [tab, setTab] = useState<'history' | 'config' | 'issues'>('history');
 
   // 点 agent 节点 → 自动切到配置
   useEffect(() => {
@@ -192,6 +193,9 @@ function GraphSideBottom() {
         <button style={{ ...tabBtnStyle, ...(tab === 'config' ? tabBtnActiveStyle : {}) }} onClick={() => setTab('config')}>
           节点配置
         </button>
+        <button style={{ ...tabBtnStyle, ...(tab === 'issues' ? tabBtnActiveStyle : {}) }} onClick={() => setTab('issues')}>
+          Issues
+        </button>
         {selected && (
           <button style={backBtnStyle} onClick={() => setSelected(null)}>
             取消选择
@@ -201,6 +205,8 @@ function GraphSideBottom() {
       <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
         {tab === 'history' ? (
           <RunPicker />
+        ) : tab === 'issues' ? (
+          <IssuesPanel />
         ) : configKey ? (
           <NodeConfigPanel nodeKey={configKey} />
         ) : (

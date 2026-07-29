@@ -21,6 +21,7 @@ import {
   MarkerType,
 } from '@xyflow/react';
 import { useGraphRunStore, type Graph, type GraphEdge, type GraphNode } from '../stores/graphRunStore';
+import { useIssuesStore } from '../stores/issuesStore';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3004';
 
@@ -41,13 +42,14 @@ interface ProviderMeta {
 
 interface NodeData {
   label: string;
-  kind: 'input' | 'agent' | 'decision' | 'end';
+  kind: 'input' | 'agent' | 'decision' | 'end' | 'router' | 'project_knowledge' | 'documenter';
   agentNodeKey?: string;
   rubricRef?: string;
+  policyRef?: string;
   [key: string]: unknown;
 }
 
-type FlowEdge = Edge & Pick<GraphEdge, 'maxIterations' | 'kind' | 'order' | 'maxRevisions' | 'onExhausted' | 'onBlocked'>;
+type FlowEdge = Edge & Pick<GraphEdge, 'maxIterations' | 'kind' | 'order' | 'maxRevisions' | 'onExhausted' | 'onBlocked' | 'lanes' | 'minRisk'>;
 
 const VIEWPORT_KEY = '0agentteams.graphViewport:';
 function readViewport(projectId: string): Viewport | null {
@@ -202,15 +204,91 @@ function EndNode() {
   );
 }
 
-const nodeTypes = { input: InputNode, agent: AgentNode, decision: DecisionNode, end: EndNode };
+/** V5：路由器节点（不进主链执行，只决策通道）。 */
+function RouterNode({ id, data }: NodeProps) {
+  const d = data as unknown as NodeData;
+  const active = useGraphRunStore((s) => s.activeNodeIds).includes(id);
+  const selected = useGraphRunStore((s) => s.selectedGraphNodeId) === id;
+  return (
+    <div className={active ? 'agent-node-active' : undefined} style={{ ...styles.decisionNode, background: '#3a2a1f', outline: selected ? '2px solid var(--accent)' : 'none' }}>
+      <Handle type='target' id='in' position={Position.Top} />
+      <div style={styles.agentHead}><strong style={{ fontSize: 11 }}>ROUTER</strong>{active && <span style={styles.badge}>路由中</span>}</div>
+      <div style={styles.agentLabel}>{d.label}</div>
+      <Handle type='source' id='route-out' position={Position.Bottom} style={{ background: '#a78bfa' }} />
+    </div>
+  );
+}
+
+/** V5：Project Knowledge 节点（issue 事实源；observe 边连 Scribe）。 */
+function KnowledgeNode({ id }: NodeProps) {
+  const selected = useGraphRunStore((s) => s.selectedGraphNodeId) === id;
+  const openCount = useIssuesStore((s) => s.issues.filter((i) => ['observed', 'confirmed', 'open'].includes(i.status)).length);
+  const closedCount = useIssuesStore((s) => s.issues.filter((i) => ['resolved', 'accepted', 'superseded'].includes(i.status)).length);
+  return (
+    <div style={{ ...styles.endNode, background: '#1f2a2a', outline: selected ? '2px solid var(--accent)' : 'none', minWidth: 120 }}>
+      <Handle type='source' id='observe-out' position={Position.Right} style={{ background: '#34d399' }} />
+      <div style={{ fontSize: 11, fontWeight: 700 }}>📚 知识库</div>
+      <div style={{ fontSize: 10, color: 'var(--text-faint)' }}>open {openCount} · closed {closedCount}</div>
+    </div>
+  );
+}
+
+/** V5：Documenter（Scribe）节点，后台总结，不进主链。 */
+function DocumenterNode({ id, data }: NodeProps) {
+  const d = data as unknown as NodeData;
+  const selected = useGraphRunStore((s) => s.selectedGraphNodeId) === id;
+  const lastSummarizeAt = useIssuesStore((s) => s.lastSummarizeAt);
+  return (
+    <div style={{ ...styles.endNode, background: '#2a2333', outline: selected ? '2px solid var(--accent)' : 'none', minWidth: 120 }}>
+      <Handle type='target' id='observe-in' position={Position.Left} style={{ background: '#34d399' }} />
+      <div style={{ fontSize: 11, fontWeight: 700 }}>✍ {d.label}</div>
+      <div style={{ fontSize: 10, color: 'var(--text-faint)' }}>{lastSummarizeAt ? `总结 ${new Date(lastSummarizeAt).toLocaleTimeString()}` : '空闲'}</div>
+    </div>
+  );
+}
+
+const nodeTypes = { input: InputNode, agent: AgentNode, decision: DecisionNode, end: EndNode, router: RouterNode, project_knowledge: KnowledgeNode, documenter: DocumenterNode };
+
+/** V5 泳道：按角色分到 Direct/Investigation/Engineering/Knowledge 列。 */
+function v5LaneOf(n: GraphNode): number {
+  if (n.type === 'input') return 0;
+  if (n.type === 'router') return 1;
+  if (n.type === 'project_knowledge') return 4;
+  if (n.type === 'documenter') return 5;
+  if (n.type === 'end') return 6;
+  const key = n.agentNodeKey ?? '';
+  if (key.includes('responder') || key.includes('review-analyst')) return 2; // Direct
+  if (key.includes('investigator') || key.includes('verify-analyst')) return 3; // Investigation
+  return 3; // Engineering: architect/plan-review/implementer/code-review/security-review/verify
+}
 
 function toFlowNodes(graph: Graph | null, agentNameMap: Map<string, string>): Node[] {
   if (!graph) return [];
+  const laneCounts = new Map<number, number>();
   return graph.nodes.map((n, i) => {
-    const pos = n.position ?? { x: 320, y: 80 + i * 140 };
-    const name = (n.type === 'agent' || n.type === 'decision') && n.agentNodeKey ? (agentNameMap.get(n.agentNodeKey) ?? n.agentNodeKey) : n.type === 'input' ? '输入' : '结束';
-    const data: NodeData = { label: name, kind: n.type, ...((n.type === 'agent' || n.type === 'decision') ? { agentNodeKey: n.agentNodeKey, ...(n.rubricRef ? { rubricRef: n.rubricRef } : {}) } : {}) };
-    return { id: n.id, type: n.type, position: pos, data, deletable: n.type !== 'input' && n.type !== 'end' } as Node;
+    const isExec = n.type === 'agent' || n.type === 'decision' || n.type === 'router' || n.type === 'documenter';
+    const name = isExec && n.agentNodeKey ? (agentNameMap.get(n.agentNodeKey) ?? n.agentNodeKey)
+      : n.type === 'input' ? '输入'
+      : n.type === 'router' ? '路由器'
+      : n.type === 'project_knowledge' ? '知识库'
+      : n.type === 'documenter' ? 'Scribe'
+      : '结束';
+    const data: NodeData = {
+      label: name, kind: n.type,
+      ...((n.type === 'agent' || n.type === 'decision') && n.agentNodeKey ? { agentNodeKey: n.agentNodeKey, ...(n.rubricRef ? { rubricRef: n.rubricRef } : {}) } : {}),
+      ...((n.type === 'router' || n.type === 'documenter') && n.agentNodeKey ? { agentNodeKey: n.agentNodeKey } : {}),
+      ...(n.type === 'router' && n.policyRef ? { policyRef: n.policyRef } : {}),
+    };
+    // V5 泳道自动布局（无显式 position 时按 lane 分列）
+    let pos = n.position;
+    if (!pos && graph.schemaVersion === 5) {
+      const lane = v5LaneOf(n);
+      const idx = laneCounts.get(lane) ?? 0;
+      laneCounts.set(lane, idx + 1);
+      pos = { x: 40 + lane * 200, y: 80 + idx * 130 };
+    }
+    const fallback = { x: 320, y: 80 + i * 140 };
+    return { id: n.id, type: n.type, position: pos ?? fallback, data, deletable: n.type !== 'input' && n.type !== 'end' } as Node;
   });
 }
 
@@ -220,17 +298,22 @@ function toFlowEdges(graph: Graph | null, backIds: Set<string>): FlowEdge[] {
     const kind = e.kind ?? (backIds.has(e.id) ? 'rework' : 'forward');
     const isBack = kind === 'rework';
     const isGate = kind === 'gate';
+    const isRoute = kind === 'route';
+    const isObserve = kind === 'observe';
+    const sourceHandle = isBack ? (graph.schemaVersion === 4 ? 'rework-out' : 'back-out') : isGate ? 'gate-out' : isRoute ? 'route-out' : isObserve ? 'observe-out' : 'out';
+    const targetHandle = isBack ? 'back-in' : isGate ? 'gate-in' : isObserve ? 'observe-in' : 'in';
+    const stroke = isBack ? '#f87171' : isGate ? '#60a5fa' : isRoute ? '#a78bfa' : isObserve ? '#34d399' : '#9aa3ad';
     return {
       id: e.id, source: e.source, target: e.target,
-      sourceHandle: isBack ? (graph.schemaVersion === 4 ? 'rework-out' : 'back-out') : isGate ? 'gate-out' : 'out',
-      targetHandle: isBack ? 'back-in' : isGate ? 'gate-in' : 'in',
+      sourceHandle, targetHandle,
       markerEnd: { type: MarkerType.ArrowClosed },
-      style: isBack ? { stroke: '#f87171', strokeDasharray: '6 4' } : isGate ? { stroke: '#60a5fa', strokeDasharray: '6 4' } : { stroke: '#9aa3ad' },
-      label: isBack ? `返工${e.maxIterations ? `·${e.maxIterations}` : ''}` : isGate ? `Gate ${e.order ?? 1}` : '',
-      labelStyle: { fill: isGate ? '#60a5fa' : '#f87171', fontSize: 10 },
+      style: { stroke, strokeDasharray: isBack || isGate || isObserve ? '6 4' : undefined },
+      label: isBack ? `返工${e.maxIterations ? `·${e.maxIterations}` : ''}` : isGate ? `Gate ${e.order ?? 1}` : isRoute ? `route${e.lanes?.length ? `·${e.lanes.join(',')}` : ''}` : isObserve ? 'observe' : '',
+      labelStyle: { fill: stroke, fontSize: 10 },
       ...(e.maxIterations != null ? { maxIterations: e.maxIterations } : {}),
       ...(e.kind ? { kind: e.kind } : {}), ...(e.order ? { order: e.order } : {}), ...(e.maxRevisions != null ? { maxRevisions: e.maxRevisions } : {}),
       ...(e.onExhausted ? { onExhausted: e.onExhausted } : {}), ...(e.onBlocked ? { onBlocked: e.onBlocked } : {}),
+      ...(e.lanes ? { lanes: e.lanes } : {}), ...(e.minRisk ? { minRisk: e.minRisk } : {}),
     } as FlowEdge;
   });
 }
@@ -552,13 +635,17 @@ function buildGraph(nodes: Node[], edges: FlowEdge[], current: Graph | null): Gr
     if (data.kind === 'input') return { ...base, type: 'input' } as GraphNode;
     if (data.kind === 'end') return { ...base, type: 'end' } as GraphNode;
     if (data.kind === 'decision') return { ...base, type: 'decision', agentNodeKey: data.agentNodeKey ?? '', rubricRef: data.rubricRef ?? 'rubric.json' } as GraphNode;
+    if (data.kind === 'router') return { ...base, type: 'router', agentNodeKey: data.agentNodeKey ?? '', policyRef: data.policyRef ?? 'router-policy.json' } as GraphNode;
+    if (data.kind === 'project_knowledge') return { ...base, type: 'project_knowledge' } as GraphNode;
+    if (data.kind === 'documenter') return { ...base, type: 'documenter', agentNodeKey: data.agentNodeKey ?? '' } as GraphNode;
     return { ...base, type: 'agent', agentNodeKey: data.agentNodeKey ?? '' } as GraphNode;
   });
-  const v4 = current?.schemaVersion === 4;
-  const graphEdges: GraphEdge[] = edges.map((e) => ({ id: v4 ? e.id : `${e.source}->${e.target}`, source: e.source, target: e.target, ...(v4 ? { kind: e.kind ?? 'forward', ...(e.kind === 'gate' ? { order: e.order ?? 1, maxRevisions: e.maxRevisions ?? 1, onExhausted: e.onExhausted ?? 'ask_user', onBlocked: e.onBlocked ?? 'ask_user' } : {}) } : e.maxIterations != null ? { maxIterations: e.maxIterations } : {}) }));
+  const sv = current?.schemaVersion ?? 3;
+  const v4plus = sv >= 4;
+  const graphEdges: GraphEdge[] = edges.map((e) => ({ id: v4plus ? e.id : `${e.source}->${e.target}`, source: e.source, target: e.target, ...(v4plus ? { kind: e.kind ?? 'forward', ...(e.kind === 'gate' ? { order: e.order ?? 1, maxRevisions: e.maxRevisions ?? 1, onExhausted: e.onExhausted ?? 'ask_user', onBlocked: e.onBlocked ?? 'ask_user' } : {}), ...(e.lanes ? { lanes: e.lanes } : {}), ...(e.minRisk ? { minRisk: e.minRisk } : {}) } : e.maxIterations != null ? { maxIterations: e.maxIterations } : {}) }));
   const inputNode = graphNodes.find((n) => n.type === 'input')?.id ?? '__input__';
   const endNode = graphNodes.find((n) => n.type === 'end')?.id;
-  return { schemaVersion: v4 ? 4 : 3, inputNode, ...(endNode ? { endNode } : {}), maxNodeExecutions: current?.maxNodeExecutions ?? 50, nodes: graphNodes, edges: graphEdges };
+  return { schemaVersion: sv, inputNode, ...(endNode ? { endNode } : {}), maxNodeExecutions: current?.maxNodeExecutions ?? 50, nodes: graphNodes, edges: graphEdges };
 }
 
 const styles: Record<string, CSSProperties> = {

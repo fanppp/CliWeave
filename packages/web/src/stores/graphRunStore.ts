@@ -9,9 +9,10 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3004';
 
 export interface GraphNode {
   id: string;
-  type: 'input' | 'agent' | 'decision' | 'end';
+  type: 'input' | 'agent' | 'decision' | 'end' | 'router' | 'project_knowledge' | 'documenter';
   agentNodeKey?: string;
   rubricRef?: string;
+  policyRef?: string;
   position?: { x: number; y: number };
 }
 export interface GraphEdge {
@@ -19,14 +20,16 @@ export interface GraphEdge {
   source: string;
   target: string;
   maxIterations?: number;
-  kind?: 'forward' | 'gate' | 'rework';
+  kind?: 'forward' | 'gate' | 'rework' | 'route' | 'observe';
   order?: number;
   maxRevisions?: number;
   onExhausted?: 'ask_user' | 'continue_best' | 'fail';
   onBlocked?: 'ask_user' | 'fail';
+  lanes?: string[];
+  minRisk?: 'low' | 'medium' | 'high' | 'critical';
 }
 export interface Graph {
-  schemaVersion: 3 | 4;
+  schemaVersion: 3 | 4 | 5;
   inputNode: string;
   endNode?: string;
   maxNodeExecutions?: number;
@@ -123,6 +126,8 @@ interface GraphRunState {
   runMode: 'auto' | 'full';
   gatePolicyOverrides: Record<string, 'ask_user' | 'continue_best' | 'fail'>;
   paused: Extract<GraphEvent, { type: 'run_paused' }> | null;
+  /** V5: 最新 Router 决策（run_plan_created），GraphRunPanel 展示 lane/risk/confidence。 */
+  lastPlan: Extract<GraphEvent, { type: 'run_plan_created' }> | null;
   setRunMode: (mode: 'auto' | 'full') => void;
   setGatePolicyOverride: (gateId: string, policy: 'ask_user' | 'continue_best' | 'fail') => void;
   resumeRun: (action: 'continue_best' | 'revise_once' | 'fail') => Promise<void>;
@@ -192,13 +197,14 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
   runMode: 'auto',
   gatePolicyOverrides: {},
   paused: null,
+  lastPlan: null,
   setRunMode: (runMode) => set({ runMode }),
   setGatePolicyOverride: (gateId, policy) => set((s) => ({ gatePolicyOverrides: { ...s.gatePolicyOverrides, [gateId]: policy } })),
   loadGraph: (g) => set({ graph: g }),
   setGraph: (g) => set({ graph: g }),
   setProjectId: (id) => {
     const restored = loadPausedResume(id);
-    set({ projectId: id, graph: null, bubbles: [], status: restored ? 'paused' : 'idle', activeNodeIds: [], nodeIterations: {}, currentRunId: restored?.runId ?? null, selectedAgentNodeKey: null, selectedGraphNodeId: null, replayGraph: null, gatePolicyOverrides: {}, paused: restored });
+    set({ projectId: id, graph: null, bubbles: [], status: restored ? 'paused' : 'idle', activeNodeIds: [], nodeIterations: {}, currentRunId: restored?.runId ?? null, selectedAgentNodeKey: null, selectedGraphNodeId: null, replayGraph: null, gatePolicyOverrides: {}, paused: restored, lastPlan: null });
   },
   loadProjectGraph: async () => {
     const pid = get().projectId;
@@ -347,7 +353,7 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
           return s;
         case 'run_plan_created': {
           const bubble: GraphBubble = { id: nextId(), nodeId: '__run__', role: 'system', content: `V5 路由：${event.lane}\nrisk=${event.risk} confidence=${event.confidence}${event.rerouted ? '（调研后重路由）' : ''}\n${event.reason}`, eventType: event.type, timestamp: event.timestamp };
-          return { ...s, bubbles: [...s.bubbles, bubble] };
+          return { ...s, bubbles: [...s.bubbles, bubble], lastPlan: event };
         }
         case 'thread_committed':
           void useThreadStore.getState().handleCommitted(event.threadId);

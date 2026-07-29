@@ -18,6 +18,7 @@ export function GraphRunPanel() {
   const abortRun = useGraphRunStore((s) => s.abortRun);
   const paused = useGraphRunStore((s) => s.paused);
   const resumeRun = useGraphRunStore((s) => s.resumeRun);
+  const lastPlan = useGraphRunStore((s) => s.lastPlan);
   const busy = status === 'starting' || status === 'running';
 
   const statusText = !connected
@@ -40,6 +41,12 @@ export function GraphRunPanel() {
         <span style={{ ...styles.dot, background: busy ? 'var(--accent)' : connected ? 'var(--success)' : 'var(--danger)' }} />
         {statusText}
       </div>
+      {lastPlan && (
+        <div style={styles.planChip} title={lastPlan.reason}>
+          <strong>路由: {lastPlan.lane}</strong>
+          <span style={styles.planMeta}>risk {lastPlan.risk} · conf {(lastPlan.confidence * 100).toFixed(0)}%{lastPlan.rerouted ? ' · 重路由' : ''}</span>
+        </div>
+      )}
       {status === 'paused' && paused && (
         <div style={styles.pauseActions}>
           {paused.options.map((action) => (
@@ -72,4 +79,6 @@ const styles: Record<string, CSSProperties> = {
   stopBtn: {},
   pauseActions: { display: 'flex', alignItems: 'center', gap: 6 },
   secondaryBtn: { background: 'var(--surface-raised)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 4, padding: '4px 8px', fontSize: 11, cursor: 'pointer' },
+  planChip: { display: 'flex', flexDirection: 'column', fontSize: 11, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 4, padding: '2px 8px', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis' },
+  planMeta: { color: 'var(--text-muted)', fontSize: 10 },
 };
