@@ -785,7 +785,7 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
       const local = readProjectLocal(projectId);
       const serverContext = buildServerContext(local?.location);
       const { prefix: contextPrefix, snapshot: contextSnapshot } = buildThreadContext(projectId, threadId, { serverContext });
-      const rubrics = graph.schemaVersion === 4 ? snapshotRubrics(projectId, graph) : undefined;
+      const rubrics = (graph.schemaVersion === 4 || graph.schemaVersion === 5) ? snapshotRubrics(projectId, graph) : undefined;
       recordRunStart(
         projectId,
         runId,

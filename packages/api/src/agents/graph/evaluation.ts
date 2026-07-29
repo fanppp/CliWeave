@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { readProjectNodeInstance } from '../project-storage.js';
-import type { GraphV4 } from './graph.js';
+import type { GraphV4, GraphV5 } from './graph.js';
 
 export interface RubricCriterion { id: string; description: string; required: boolean; weight: number }
 export interface Rubric { schemaVersion: 1; name: string; criteria: RubricCriterion[] }
@@ -40,8 +40,9 @@ export function readDecisionRubric(projectId: string, decision: Extract<GraphV4[
   return rubric;
 }
 
-export function snapshotRubrics(projectId: string, graph: GraphV4): Record<string, { rubricRef: string; hash: string; rubric: Rubric }> {
-  return Object.fromEntries(graph.nodes.filter((n): n is Extract<GraphV4['nodes'][number], { type: 'decision' }> => n.type === 'decision').map((node) => {
+export function snapshotRubrics(projectId: string, graph: GraphV4 | GraphV5): Record<string, { rubricRef: string; hash: string; rubric: Rubric }> {
+  const decisions = graph.nodes.filter((n) => n.type === 'decision') as Extract<GraphV4['nodes'][number], { type: 'decision' }>[];
+  return Object.fromEntries(decisions.map((node) => {
     const rubric = readDecisionRubric(projectId, node);
     const canonical = JSON.stringify(rubric);
     return [node.id, { rubricRef: node.rubricRef, hash: createHash('sha256').update(canonical).digest('hex'), rubric }];

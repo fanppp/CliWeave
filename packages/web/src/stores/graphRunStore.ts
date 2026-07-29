@@ -64,6 +64,7 @@ export type GraphEvent =
       decision: 'finish' | 'forward' | 'clarify'; reason: string; timestamp: number;
     }
   | { type: 'branch_done'; runId: string; branchId: string; cause: 'early_complete' | 'needs_input' | 'end'; finalArtifact: string; timestamp: number }
+  | { type: 'run_plan_created'; runId: string; lane: string; entryNodeId: string; gateNodeIds: string[]; rerouted: boolean; confidence: number; risk: string; reason: string; timestamp: number }
   | { type: 'thread_committed'; runId: string; threadId: string; turnId: string; revision: number; status: 'completed' | 'failed' }
   | { type: 'candidate_produced'; runId: string; branchId: string; gateId?: string; candidate: { id: string; workNodeId: string; revision: number; artifact: string }; timestamp: number }
   | { type: 'evaluation_done'; runId: string; branchId: string; gateId: string; decisionNodeId: string; evaluation: { verdict: 'approve' | 'revise' | 'blocked'; feedback?: string; reason?: string }; timestamp: number }
@@ -344,6 +345,10 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
         }
         case 'branch_done':
           return s;
+        case 'run_plan_created': {
+          const bubble: GraphBubble = { id: nextId(), nodeId: '__run__', role: 'system', content: `V5 路由：${event.lane}\nrisk=${event.risk} confidence=${event.confidence}${event.rerouted ? '（调研后重路由）' : ''}\n${event.reason}`, eventType: event.type, timestamp: event.timestamp };
+          return { ...s, bubbles: [...s.bubbles, bubble] };
+        }
         case 'thread_committed':
           void useThreadStore.getState().handleCommitted(event.threadId);
           return { ...s, status: event.status === 'completed' ? 'done' : s.status };

@@ -22,6 +22,8 @@ import { extractVerdict, type TrailEntry, type Verdict, type VerdictContext } fr
 import { AUTO_ROUTE_INSTRUCTION, extractCompletion, type RunMode } from './completion.js';
 import type { PublicGraphEvent, PersistedRunEvent } from '../../infrastructure/websocket/SocketManager.js';
 import { walkEvaluatorOptimizerGraph } from './EvaluatorOptimizerRouter.js';
+import { walkV5Graph } from './V5Router.js';
+import type { IntentMode } from './routing.js';
 import type { Rubric } from './evaluation.js';
 
 export interface ExecuteOptions {
@@ -402,6 +404,10 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
 }
 
 export async function executeGraph(prompt: string, graph: AnyGraph, opts: ExecuteOptions): Promise<void> {
+  if (graph.schemaVersion === 5) {
+    const intentMode: IntentMode = (opts.runMode ?? 'full') === 'auto' ? 'auto' : 'change';
+    return walkV5Graph(prompt, graph, opts, runAgentNode, intentMode);
+  }
   return graph.schemaVersion === 4
     ? walkEvaluatorOptimizerGraph(prompt, graph, opts, runAgentNode)
     : walkGraph(prompt, graph, opts, runAgentNode);

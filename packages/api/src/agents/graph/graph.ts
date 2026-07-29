@@ -81,17 +81,62 @@ export const GraphV4Schema = z.object({
   maxNodeExecutions: z.number().int().min(1).max(1000).default(50),
   nodes: z.array(V4NodeSchema).min(1), edges: z.array(V4EdgeSchema),
 }).strict();
-export const GraphSchema = z.discriminatedUnion('schemaVersion', [GraphV3Schema, GraphV4Schema]);
-
 export type GraphV4 = z.infer<typeof GraphV4Schema>;
+
+// ── v5 schema：Router + ProjectKnowledge + Documenter + 多通道路由 ──────────────
+export const RouteLaneSchema = z.enum([
+  'direct_answer', 'investigate', 'plan_only', 'small_change', 'planned_change',
+  'review_only', 'verify_only', 'clarify', 'unsupported',
+]);
+export type RouteLane = z.infer<typeof RouteLaneSchema>;
+export const RiskSchema = z.enum(['low', 'medium', 'high', 'critical']);
+export type Risk = z.infer<typeof RiskSchema>;
+
+const V5InputNodeSchema = V3InputNodeSchema;
+const V5RouterNodeSchema = z.object({
+  id: GraphNodeIdSchema, type: z.literal('router'), agentNodeKey: AgentNodeKeySchema,
+  policyRef: z.string().regex(/^[a-zA-Z0-9._/-]+$/, 'invalid policyRef').default('router-policy.json'),
+  position: PositionSchema.optional(),
+}).strict();
+const V5AgentNodeSchema = V3AgentNodeSchema;
+const V5DecisionNodeSchema = V4DecisionNodeSchema;
+const V5ProjectKnowledgeNodeSchema = z.object({ id: GraphNodeIdSchema, type: z.literal('project_knowledge'), position: PositionSchema.optional() }).strict();
+const V5DocumenterNodeSchema = z.object({ id: GraphNodeIdSchema, type: z.literal('documenter'), agentNodeKey: AgentNodeKeySchema, position: PositionSchema.optional() }).strict();
+const V5EndNodeSchema = V3EndNodeSchema;
+export const V5NodeSchema = z.discriminatedUnion('type', [
+  V5InputNodeSchema, V5RouterNodeSchema, V5AgentNodeSchema, V5DecisionNodeSchema,
+  V5ProjectKnowledgeNodeSchema, V5DocumenterNodeSchema, V5EndNodeSchema,
+]);
+const V5ForwardEdgeSchema = z.object({ id: EdgeIdSchema, source: GraphNodeIdSchema, target: GraphNodeIdSchema, kind: z.literal('forward'), lanes: z.array(RouteLaneSchema).optional(), minRisk: RiskSchema.optional() }).strict();
+const V5GateEdgeSchema = z.object({
+  id: EdgeIdSchema, source: GraphNodeIdSchema, target: GraphNodeIdSchema, kind: z.literal('gate'),
+  order: z.number().int().min(1), maxRevisions: z.number().int().min(0).max(20).default(1),
+  onExhausted: ExhaustedPolicySchema.default('ask_user'), onBlocked: BlockedPolicySchema.default('ask_user'),
+  lanes: z.array(RouteLaneSchema).optional(), minRisk: RiskSchema.optional(),
+}).strict();
+const V5ReworkEdgeSchema = z.object({ id: EdgeIdSchema, source: GraphNodeIdSchema, target: GraphNodeIdSchema, kind: z.literal('rework') }).strict();
+const V5RouteEdgeSchema = z.object({ id: EdgeIdSchema, source: GraphNodeIdSchema, target: GraphNodeIdSchema, kind: z.literal('route'), lanes: z.array(RouteLaneSchema).min(1) }).strict();
+const V5ObserveEdgeSchema = z.object({ id: EdgeIdSchema, source: GraphNodeIdSchema, target: GraphNodeIdSchema, kind: z.literal('observe') }).strict();
+export const V5EdgeSchema = z.discriminatedUnion('kind', [V5ForwardEdgeSchema, V5GateEdgeSchema, V5ReworkEdgeSchema, V5RouteEdgeSchema, V5ObserveEdgeSchema]);
+export const GraphV5Schema = z.object({
+  schemaVersion: z.literal(5), inputNode: GraphNodeIdSchema, endNode: GraphNodeIdSchema.optional(),
+  maxNodeExecutions: z.number().int().min(1).max(1000).default(50),
+  nodes: z.array(V5NodeSchema).min(1), edges: z.array(V5EdgeSchema),
+}).strict();
+export type GraphV5 = z.infer<typeof GraphV5Schema>;
+export type GraphV5Node = z.infer<typeof V5NodeSchema>;
+export type GraphV5Edge = z.infer<typeof V5EdgeSchema>;
+
+export const GraphSchema = z.discriminatedUnion('schemaVersion', [GraphV3Schema, GraphV4Schema, GraphV5Schema]);
+
 /** Graph/GraphNode/GraphEdge 保留 V3 别名，避免 legacy runner 和外部测试被联合类型污染。 */
 export type Graph = GraphV3;
 export type GraphNode = GraphV3Node;
 export type GraphEdge = GraphV3Edge;
 export type GraphAgentNode = Extract<GraphNode, { type: 'agent' }>;
-export type AnyGraph = GraphV3 | GraphV4;
+export type AnyGraph = GraphV3 | GraphV4 | GraphV5;
 export type AnyGraphNode = AnyGraph['nodes'][number];
-export type AnyGraphAgentNode = Extract<AnyGraphNode, { type: 'agent' | 'decision' }>;
+export type AnyGraphAgentNode = Extract<AnyGraphNode, { type: 'agent' | 'decision' | 'router' | 'documenter' }>;
 export type ExhaustedPolicy = z.infer<typeof ExhaustedPolicySchema>;
 
 /** 默认最大覆盖次数（回边未配 maxIterations 时用）= 该回边最多被遍历几次。 */
@@ -180,6 +225,7 @@ function parseAndNormalize(raw: unknown): AnyGraph {
   if (sv === 2) return normalizeV2ToV3(GraphV2Schema.parse(raw));
   if (sv === 3) return GraphV3Schema.parse(raw);
   if (sv === 4) return GraphV4Schema.parse(raw);
+  if (sv === 5) return GraphV5Schema.parse(raw);
   throw new GraphValidationError(`unsupported schemaVersion: ${String(sv)}`);
 }
 
@@ -259,6 +305,7 @@ export function validateGraph(graph: AnyGraph): void {
   // input 出边数量编辑期不限（可扇出多条前向 → 并行多个首层分支）
 
   if (graph.schemaVersion === 4) validateV4Topology(graph);
+  else if (graph.schemaVersion === 5) validateV5Topology(graph);
 }
 
 function validateV4Topology(graph: GraphV4): void {
@@ -302,6 +349,10 @@ function validateV4Topology(graph: GraphV4): void {
 export function validateRunnable(graph: AnyGraph): void {
   if (graph.schemaVersion === 4) {
     validateV4Runnable(graph);
+    return;
+  }
+  if (graph.schemaVersion === 5) {
+    validateV5Runnable(graph);
     return;
   }
   const backEdges = computeBackEdges(graph);
@@ -363,6 +414,113 @@ function validateV4Runnable(graph: GraphV4): void {
   }
 }
 
+/**
+ * V5 拓扑校验（编辑期）：
+ * - Input 唯一且只 forward 连 Router；Router 唯一且不得拥有 gate/rework。
+ * - 每个 lane 只映射到一个 route 入口。
+ * - Knowledge/Documenter 仅 observe，不进主 payload 路径（forward/gate/rework 不涉及它们）。
+ * - route: router→agent；observe: project_knowledge→documenter。
+ * - work forward ≤1；gate order 连续；decision gate-in/rework-out 一致（同 V4）。
+ */
+function validateV5Topology(graph: GraphV5): void {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  const routers = graph.nodes.filter((n) => n.type === 'router');
+  if (routers.length !== 1) throw new GraphValidationError(`V5 expects exactly one router node, got ${routers.length}`);
+  const router = routers[0];
+  const inputOuts = graph.edges.filter((e) => e.source === graph.inputNode);
+  if (inputOuts.length !== 1 || inputOuts[0].target !== router.id || inputOuts[0].kind !== 'forward') {
+    throw new GraphValidationError(`input must connect only to the router '${router.id}' via a forward edge`);
+  }
+  const routerOuts = graph.edges.filter((e) => e.source === router.id);
+  if (routerOuts.some((e) => e.kind === 'gate' || e.kind === 'rework')) throw new GraphValidationError(`router '${router.id}' must not own gate/rework edges`);
+  const laneToEntry = new Map<RouteLane, string>();
+  for (const e of routerOuts) {
+    if (e.kind !== 'route') continue;
+    for (const lane of e.lanes) {
+      if (laneToEntry.has(lane)) throw new GraphValidationError(`lane '${lane}' maps to multiple route entries`);
+      laneToEntry.set(lane, e.target);
+    }
+  }
+  for (const e of graph.edges) {
+    const s = byId.get(e.source), t = byId.get(e.target);
+    if (e.kind === 'observe') {
+      if (s?.type !== 'project_knowledge') throw new GraphValidationError(`observe '${e.id}' source must be project_knowledge`);
+      if (t?.type !== 'documenter') throw new GraphValidationError(`observe '${e.id}' target must be documenter`);
+      continue;
+    }
+    if (e.kind === 'route') {
+      if (s?.type !== 'router') throw new GraphValidationError(`route '${e.id}' source must be router`);
+      if (t?.type !== 'agent') throw new GraphValidationError(`route '${e.id}' target must be an agent (lane entry)`);
+      continue;
+    }
+    // forward/gate/rework：source 不得是 router/knowledge/documenter；target 不得是 knowledge/documenter；
+    // target=router 仅允许 input→router 这一条 forward。
+    if (s && (s.type === 'router' || s.type === 'project_knowledge' || s.type === 'documenter')) {
+      throw new GraphValidationError(`edge '${e.id}' source must not be ${s.type} node`);
+    }
+    if (t && (t.type === 'project_knowledge' || t.type === 'documenter')) {
+      throw new GraphValidationError(`edge '${e.id}' target must not be ${t.type} node`);
+    }
+    if (t && t.type === 'router' && !(e.kind === 'forward' && e.source === graph.inputNode)) {
+      throw new GraphValidationError(`edge '${e.id}' must not target router (except the input→router forward)`);
+    }
+    if (e.kind === 'forward') {
+      if (s?.type === 'decision') throw new GraphValidationError(`decision '${s.id}' cannot own forward edge`);
+      if (t?.type === 'decision') throw new GraphValidationError(`forward edge cannot target decision '${t.id}'`);
+    } else if (e.kind === 'gate') {
+      if (s?.type !== 'agent' || t?.type !== 'decision') throw new GraphValidationError(`gate '${e.id}' must be agent -> decision`);
+    } else { // rework
+      if (s?.type !== 'decision' || t?.type !== 'agent') throw new GraphValidationError(`rework '${e.id}' must be decision -> agent`);
+    }
+  }
+  for (const node of graph.nodes) {
+    if (node.type === 'agent') {
+      const forward = graph.edges.filter((e) => e.kind === 'forward' && e.source === node.id);
+      if (forward.length > 1) throw new GraphValidationError(`work '${node.id}' has more than one forward edge`);
+      const gates = graph.edges.filter((e): e is Extract<GraphV5['edges'][number], { kind: 'gate' }> => e.kind === 'gate' && e.source === node.id);
+      const orders = new Set(gates.map((e) => e.order));
+      if (orders.size !== gates.length) throw new GraphValidationError(`work '${node.id}' has duplicate gate order`);
+      const sorted = [...orders].sort((a, b) => a - b);
+      if (sorted.some((v, i) => v !== i + 1)) throw new GraphValidationError(`work '${node.id}' gate order must be contiguous from 1`);
+    }
+    if (node.type === 'decision') {
+      const gateIn = graph.edges.filter((e) => e.kind === 'gate' && e.target === node.id);
+      const reworkOut = graph.edges.filter((e) => e.kind === 'rework' && e.source === node.id);
+      if (gateIn.length !== 1 || reworkOut.length !== 1) throw new GraphValidationError(`decision '${node.id}' requires exactly one gate in and one rework out`);
+      if (reworkOut[0]?.target !== gateIn[0]?.source) throw new GraphValidationError(`decision '${node.id}' must rework its gated work`);
+    }
+  }
+}
+
+/**
+ * V5 可运行性校验：router 有 route 边；每个非 clarify/unsupported lane 经 forward 链确定性到达 End。
+ * forward 无 lanes 永远活跃；带 lanes 的仅对匹配 lane 活跃（同一 lane 下每 work 最多一有效 forward）。
+ */
+function validateV5Runnable(graph: GraphV5): void {
+  const routers = graph.nodes.filter((n) => n.type === 'router');
+  const router = routers[0];
+  const routeEdges = graph.edges.filter((e): e is Extract<GraphV5['edges'][number], { kind: 'route' }> => e.kind === 'route' && e.source === router.id);
+  if (routeEdges.length === 0) throw new GraphValidationError(`V5 router has no route edges`);
+  const forward = graph.edges.filter((e) => e.kind === 'forward');
+  for (const re of routeEdges) {
+    for (const lane of re.lanes) {
+      if (lane === 'clarify' || lane === 'unsupported') continue;
+      let cur: string | undefined = re.target;
+      const seen = new Set<string>();
+      let reachedEnd = false;
+      while (cur) {
+        if (seen.has(cur)) break;
+        seen.add(cur);
+        const node = graph.nodes.find((n) => n.id === cur);
+        if (node?.type === 'end') { reachedEnd = true; break; }
+        const next = forward.find((e) => e.source === cur && (!e.lanes || e.lanes.includes(lane)));
+        cur = next?.target;
+      }
+      if (!reachedEnd) throw new GraphValidationError(`lane '${lane}' does not deterministically reach End`);
+    }
+  }
+}
+
 /** 新画布默认图（仅 input 节点，待用户加 agent/end）。 */
 export function getDefaultProjectGraph(): GraphV3 {
   return {
@@ -408,11 +566,15 @@ export function readProjectGraph(projectId: string): AnyGraph {
   return readGraphFile(projectGraphFile(projectId), getDefaultProjectGraph());
 }
 
-/** 原子写入画布图（强制 projectId）。 */
+/** 原子写入画布图（强制 projectId）。拒绝 V5→V4/V3 降级（须用显式迁移向导）。 */
 export function writeProjectGraph(projectId: string, graph: AnyGraph): void {
   const parsed = GraphSchema.parse(graph);
   validateGraph(parsed);
   const file = projectGraphFile(projectId);
+  const existing = existsSync(file) ? parseGraphRaw(JSON.parse(readFileSync(file, 'utf-8').replace(/^\uFEFF/, '') ?? '{}')) : null;
+  if (existing && existing.schemaVersion === 5 && parsed.schemaVersion < 5) {
+    throw new GraphValidationError(`refusing to downgrade graph from V5 to V${parsed.schemaVersion} (use the explicit migration wizard)`);
+  }
   const tmp = `${file}.tmp`;
   writeFileSync(tmp, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
   renameSync(tmp, file);
@@ -424,8 +586,7 @@ export function writeProjectGraph(projectId: string, graph: AnyGraph): void {
  */
 export function validateProjectRun(projectId: string, graph: AnyGraph): void {
   validateRunnable(graph);
-  if (graph.schemaVersion === 4) {
-    // Import kept local to avoid making legacy graph parsing depend on node storage initialization.
+  if (graph.schemaVersion === 4 || graph.schemaVersion === 5) {
     for (const node of graph.nodes) if (node.type === 'decision') readDecisionRubric(projectId, node);
   }
   // M6: frozen 节点 .last-output.json 缓存检查（决策节点须含 verdict）
