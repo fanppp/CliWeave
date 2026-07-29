@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "name": "安全审核 rubric",
+  "criteria": [
+    {
+      "id": "correctness",
+      "description": "产物正确、完整并满足原始需求",
+      "required": true,
+      "weight": 1
+    }
+  ]
+}

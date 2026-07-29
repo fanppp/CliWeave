@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 4,
+  "localId": "project-scribe",
+  "name": "GLM 项目记录员",
+  "provider": "opencode",
+  "cli": {
+    "command": "opencode",
+    "sandboxMode": "read-only",
+    "extraArgs": [],
+    "promptVia": "stdin",
+    "cwd": "${PROJECT_PATH}"
+  },
+  "model": "alibaba-cn/glm-5.2",
+  "storage": {
+    "config": {
+      "identityFile": "config/identity.md",
+      "rulesFiles": ["config/rules/*.md"]
+    },
+    "runtime": {
+      "activeSessionFile": "runtime/active-session.json",
+      "resume": true
+    },
+    "data": {
+      "cliHome": "data/cli/.opencode"
+    }
+  }
+}

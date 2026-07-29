@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 4,
+  "localId": "investigator",
+  "name": "调研者",
+  "provider": "opencode",
+  "cli": {
+    "command": "opencode",
+    "sandboxMode": "danger-full-access",
+    "extraArgs": [],
+    "promptVia": "stdin",
+    "cwd": "${PROJECT_PATH}"
+  },
+  "model": "alibaba-cn/glm-5.2",
+  "storage": {
+    "config": {
+      "identityFile": "config/identity.md",
+      "rulesFiles": [
+        "config/rules/*.md"
+      ]
+    },
+    "runtime": {
+      "activeSessionFile": "runtime/active-session.json",
+      "resume": true
+    },
+    "data": {
+      "cliHome": "data/cli/.opencode"
+    }
+  }
+}

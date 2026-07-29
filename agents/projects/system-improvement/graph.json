@@ -1,140 +1,286 @@
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "inputNode": "__input__",
   "endNode": "__end__",
   "maxNodeExecutions": 80,
   "nodes": [
     {
       "id": "__input__",
-      "type": "input",
-      "position": {
-        "x": 141.74323048975185,
-        "y": -431.8491051252323
-      }
+      "type": "input"
+    },
+    {
+      "id": "router",
+      "type": "router",
+      "agentNodeKey": "opencode:project-router",
+      "policyRef": "router-policy.json"
+    },
+    {
+      "id": "responder",
+      "type": "agent",
+      "agentNodeKey": "opencode:responder"
+    },
+    {
+      "id": "investigator",
+      "type": "agent",
+      "agentNodeKey": "opencode:investigator"
     },
     {
       "id": "architect",
       "type": "agent",
-      "agentNodeKey": "opencode:architect",
-      "position": {
-        "x": 220.37218782700933,
-        "y": -75.95189520012138
-      }
+      "agentNodeKey": "opencode:architect"
     },
     {
-      "id": "plan_reviewer",
+      "id": "plan-review",
       "type": "decision",
       "agentNodeKey": "codex:plan-reviewer",
-      "rubricRef": "rubric.json",
-      "position": {
-        "x": 533.7396698775833,
-        "y": -10.34581627912544
-      }
+      "rubricRef": "rubric.json"
     },
     {
       "id": "implementer",
       "type": "agent",
-      "agentNodeKey": "opencode:implementer",
-      "position": {
-        "x": 221.40167081602897,
-        "y": 230.1970858853351
-      }
+      "agentNodeKey": "opencode:implementer"
     },
     {
-      "id": "code_reviewer",
+      "id": "code-review",
       "type": "decision",
       "agentNodeKey": "codex:code-reviewer",
-      "rubricRef": "rubric.json",
-      "position": {
-        "x": 529.8626214659399,
-        "y": 235.76947935331506
-      }
+      "rubricRef": "rubric.json"
     },
     {
-      "id": "verifier",
+      "id": "security-review",
+      "type": "decision",
+      "agentNodeKey": "codex:security-review",
+      "rubricRef": "rubric.json"
+    },
+    {
+      "id": "verify",
       "type": "decision",
       "agentNodeKey": "claude:verifier",
-      "rubricRef": "rubric.json",
-      "position": {
-        "x": 527.4981608651098,
-        "y": 339.2120839760527
-      }
+      "rubricRef": "rubric.json"
+    },
+    {
+      "id": "review-analyst",
+      "type": "agent",
+      "agentNodeKey": "opencode:review-analyst"
+    },
+    {
+      "id": "verify-analyst",
+      "type": "agent",
+      "agentNodeKey": "opencode:verify-analyst"
+    },
+    {
+      "id": "__knowledge__",
+      "type": "project_knowledge"
+    },
+    {
+      "id": "scribe",
+      "type": "documenter",
+      "agentNodeKey": "opencode:project-scribe"
     },
     {
       "id": "__end__",
-      "type": "end",
-      "position": {
-        "x": 244.98910769645607,
-        "y": 458.02971116983974
-      }
+      "type": "end"
     }
   ],
   "edges": [
     {
-      "id": "main-input-architect",
+      "id": "in->router",
       "source": "__input__",
+      "target": "router",
+      "kind": "forward"
+    },
+    {
+      "id": "route-answer",
+      "source": "router",
+      "target": "responder",
+      "kind": "route",
+      "lanes": [
+        "direct_answer"
+      ]
+    },
+    {
+      "id": "route-investigate",
+      "source": "router",
+      "target": "investigator",
+      "kind": "route",
+      "lanes": [
+        "investigate"
+      ]
+    },
+    {
+      "id": "route-architect",
+      "source": "router",
       "target": "architect",
-      "kind": "forward"
+      "kind": "route",
+      "lanes": [
+        "plan_only",
+        "planned_change"
+      ]
     },
     {
-      "id": "main-architect-implementer",
-      "source": "architect",
+      "id": "route-implementer",
+      "source": "router",
       "target": "implementer",
-      "kind": "forward"
+      "kind": "route",
+      "lanes": [
+        "small_change"
+      ]
     },
     {
-      "id": "main-implementer-end",
-      "source": "implementer",
+      "id": "route-review",
+      "source": "router",
+      "target": "review-analyst",
+      "kind": "route",
+      "lanes": [
+        "review_only"
+      ]
+    },
+    {
+      "id": "route-verify-analyst",
+      "source": "router",
+      "target": "verify-analyst",
+      "kind": "route",
+      "lanes": [
+        "verify_only"
+      ]
+    },
+    {
+      "id": "responder->end",
+      "source": "responder",
       "target": "__end__",
       "kind": "forward"
     },
     {
-      "id": "gate-plan-review",
+      "id": "investigator->end",
+      "source": "investigator",
+      "target": "__end__",
+      "kind": "forward"
+    },
+    {
+      "id": "architect->implementer",
       "source": "architect",
-      "target": "plan_reviewer",
+      "target": "implementer",
+      "kind": "forward",
+      "lanes": [
+        "planned_change"
+      ]
+    },
+    {
+      "id": "architect->end",
+      "source": "architect",
+      "target": "__end__",
+      "kind": "forward",
+      "lanes": [
+        "plan_only"
+      ]
+    },
+    {
+      "id": "gate-plan",
+      "source": "architect",
+      "target": "plan-review",
       "kind": "gate",
       "order": 1,
       "maxRevisions": 2,
       "onExhausted": "ask_user",
-      "onBlocked": "ask_user"
+      "onBlocked": "ask_user",
+      "lanes": [
+        "plan_only",
+        "planned_change"
+      ]
     },
     {
-      "id": "rework-plan-architect",
-      "source": "plan_reviewer",
+      "id": "rework-plan",
+      "source": "plan-review",
       "target": "architect",
       "kind": "rework"
     },
     {
-      "id": "gate-code-review",
+      "id": "implementer->end",
       "source": "implementer",
-      "target": "code_reviewer",
-      "kind": "gate",
-      "order": 1,
-      "maxRevisions": 3,
-      "onExhausted": "ask_user",
-      "onBlocked": "ask_user"
+      "target": "__end__",
+      "kind": "forward",
+      "lanes": [
+        "small_change",
+        "planned_change"
+      ]
     },
     {
-      "id": "rework-code-implementer",
-      "source": "code_reviewer",
+      "id": "gate-code",
+      "source": "implementer",
+      "target": "code-review",
+      "kind": "gate",
+      "order": 1,
+      "maxRevisions": 2,
+      "onExhausted": "ask_user",
+      "onBlocked": "ask_user",
+      "lanes": [
+        "small_change",
+        "planned_change"
+      ]
+    },
+    {
+      "id": "rework-code",
+      "source": "code-review",
+      "target": "implementer",
+      "kind": "rework"
+    },
+    {
+      "id": "gate-security",
+      "source": "implementer",
+      "target": "security-review",
+      "kind": "gate",
+      "order": 2,
+      "maxRevisions": 1,
+      "onExhausted": "ask_user",
+      "onBlocked": "fail",
+      "lanes": [
+        "planned_change"
+      ],
+      "minRisk": "high"
+    },
+    {
+      "id": "rework-security",
+      "source": "security-review",
       "target": "implementer",
       "kind": "rework"
     },
     {
       "id": "gate-verify",
       "source": "implementer",
-      "target": "verifier",
+      "target": "verify",
       "kind": "gate",
-      "order": 2,
+      "order": 3,
       "maxRevisions": 2,
       "onExhausted": "ask_user",
-      "onBlocked": "ask_user"
+      "onBlocked": "ask_user",
+      "lanes": [
+        "small_change",
+        "planned_change"
+      ]
     },
     {
-      "id": "rework-verify-implementer",
-      "source": "verifier",
+      "id": "rework-verify",
+      "source": "verify",
       "target": "implementer",
       "kind": "rework"
+    },
+    {
+      "id": "review-analyst->end",
+      "source": "review-analyst",
+      "target": "__end__",
+      "kind": "forward"
+    },
+    {
+      "id": "verify-analyst->end",
+      "source": "verify-analyst",
+      "target": "__end__",
+      "kind": "forward"
+    },
+    {
+      "id": "observe-scribe",
+      "source": "__knowledge__",
+      "target": "scribe",
+      "kind": "observe"
     }
   ]
 }
