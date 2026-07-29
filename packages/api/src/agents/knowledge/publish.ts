@@ -73,26 +73,33 @@ export interface PublishResult {
   issues: number;
 }
 
-/** 投影 issues → 写 <projectPath>/docs/agent-team/PROJECT_ISSUES.md。 */
-export function publishIssues(projectId: string): PublishResult {
+/** 把已通过校验的内容写回 <projectPath>/docs/agent-team/PROJECT_ISSUES.md（路径 jail + secret scan + dirty-worktree + 原子写）。 */
+export function writeProjectIssues(projectId: string, content: string): PublishResult {
   const projectPath = resolveProjectPath(projectId);
   const targetAbs = resolve(projectPath, TARGET_REL);
-  // 路径 jail
   const rel = relative(projectPath, targetAbs);
   if (isAbsolute(rel) || rel.startsWith('..')) throw new PublishError(`target escapes project path: ${targetAbs}`);
   if (existsSync(targetAbs) && statSync(targetAbs).isDirectory()) throw new PublishError(`target is a directory: ${targetAbs}`);
-  const issues = listIssues(projectId);
-  const content = projectIssuesMarkdown(issues);
-  // secret scan
   const secret = scanSecrets(content);
   if (secret) throw new PublishError(`refused to publish: ${secret}`);
-  // dirty-worktree
   const dirty = dirtyWorktreeConflict(projectPath, targetAbs);
   if (dirty) throw new PublishError(`refused to publish: ${dirty}`);
-  // 原子写
   mkdirSync(dirname(targetAbs), { recursive: true });
   const tmp = `${targetAbs}.tmp`;
   writeFileSync(tmp, content, 'utf-8');
   renameSync(tmp, targetAbs);
-  return { target: targetAbs, issues: issues.length };
+  return { target: targetAbs, issues: -1 };
+}
+
+/** 投影 issues → 写 <projectPath>/docs/agent-team/PROJECT_ISSUES.md。 */
+export function publishIssues(projectId: string): PublishResult {
+  const content = projectIssuesMarkdown(listIssues(projectId));
+  const result = writeProjectIssues(projectId, content);
+  return { target: result.target, issues: listIssues(projectId).length };
+}
+
+/** 写入 Scribe 已校验草案（同 guards；issues 数取自 store）。 */
+export function publishIssuesDraft(projectId: string, draft: string): PublishResult {
+  const result = writeProjectIssues(projectId, draft);
+  return { target: result.target, issues: listIssues(projectId).length };
 }

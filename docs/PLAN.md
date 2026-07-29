@@ -160,7 +160,7 @@
 | **V5 Schema** | RouterNode/ProjectKnowledgeNode/DocumenterNode + RouteEdge/ObserveEdge + forward/gate 加 lanes/minRisk + 校验 + RouteDecision + CreateRunRequest(intentMode) + RunCoordinator + 独立 runner 不读时迁移 | ✅ 完成（本提交） | — |
 | **V5 角色/模板** | 默认路线 direct_answer/investigate/plan_only/small_change/planned_change/review_only/verify_only + 高风险加 Security Reviewer + 发布部署迁移只产计划暂停 + 新项目默认 V5 模板 + opencode:project-router GLM-5.2 fresh + 缺 Provider 明确报告 | ✅ 完成（本提交） | — |
 | **Project Knowledge** | knowledge/ 事实源(.gitignore) + FindingEvent 状态机 + 服务端 fingerprint + API GET/confirm/resolve/accept/reopen/publish + Issues 面板 + Publish 路径 jail/secret scan/冲突/dirty-worktree | ✅ 完成（本提交，Issues 面板 UI 留 #7） | — |
-| **Project Scribe** | opencode:project-scribe GLM-5.2 可选 documenter 接 Knowledge observe 边 + 不进主链/不影响 run 成败 + 只输出 ISSUE_SUMMARY_DRAFT + 无 Scribe 时 IssueProjector 确定性模板 | ❌ 未开始（commit #6） | — |
+| **Project Scribe** | opencode:project-scribe GLM-5.2 可选 documenter 接 Knowledge observe 边 + 不进主链/不影响 run 成败 + 只输出 ISSUE_SUMMARY_DRAFT + 无 Scribe 时 IssueProjector 确定性模板 | ✅ 完成（本提交） | — |
 | **V5 画布/Issues UI** | 四泳道 Direct/Investigation/Engineering/Knowledge + Router 显示 lane/risk/confidence + Knowledge open/resolved 数 + Scribe 状态 + Issues 面板 | ❌ 未开始（commit #7） | — |
 | **能力策略/迁移文档** | 应用层 CapabilityPolicy（projectRead/Write、commandExec、network、externalSideEffects 各角色）+ V3→legacy/V4→保持/V4→V5 预览式显式升级 + OpenCode/Claude 不构成硬隔离 | ❌ 未开始（commit #8） | — |
 
@@ -195,8 +195,9 @@
 - **V5 角色/模板（本提交）**：`v5-workspace.ts` `V5_ROLES`（11 角色：project-router/responder/investigator/architect/plan-review/implementer/code-review/security-review/verify/review-analyst/verify-analyst；opencode 角色用 GLM-5.2，codex/claude 各自默认）+ `getDefaultV5ProjectGraph()` 7 通道模板（plan_only 发布/部署/迁移到此结束不自动执行；planned_change 经 Architect→Plan Review→Implementer→Code/Security/Verify；security gate lanes=[planned_change] minRisk=high 故 small_change 跳过）+ `scaffoldV5Workspace(pid)` 实例化角色节点（decision 角色写默认 rubric）+ 写 V5 图，幂等。`graph.ts` `validateV5Topology` forward≤1 改为 **per-lane**（无 lanes 视为永远活跃不与其它共存；同 lane 最多一 forward）——允许 architect 有 plan_only/planned_change 两条 forward。`V5Router.walkLane` gate 按 lane 过滤（small_change 跳 security）。`projects.ts` POST /api/projects 建项目后调 scaffoldV5Workspace（既有项目/test 不自动升级）。buildAgent 已对未注册 provider 明确抛错（不静默替换）。测试：v5-workspace(7)+模板 lane(2)。
 
 - **Project Knowledge（本提交）**：`knowledge/issue-store.ts` FindingEvent 事件源（issues.events.jsonl append-only + issues.index.json 可重建缓存）+ 状态机（observed→confirmed/open→resolved/accepted/superseded）+ `computeFingerprint`（服务端稳定字段 sha256，禁止 LLM 自造 ID）+ `recordFinding`（同 fingerprint 的开放问题追加 evidence/occurrence 不新建；run 完成/abort 不自动关闭）+ confirm/resolve/accept/reopen（非法状态拒绝）+ `fold` 重建索引。`knowledge/publish.ts` `projectIssuesMarkdown`（IssueProjector 确定性模板：open/closed 分组 + severity + source + occurrences）+ `publishIssues`（路径 jail 不得逃逸 projectPath + secret scan 拒可疑密钥 + dirty-worktree 拒覆盖未提交改动 + 原子写 `<projectPath>/docs/agent-team/PROJECT_ISSUES.md`）。`projects.ts` observeFinding 挂到 record 回调（node_error/run_error/gate_status blocked·exhausted/gate_blocked/evaluation blocked/run_done best_effort 遗留 → observed；run_error 确证）+ issues CRUD 路由（GET/confirm/resolve/accept/reopen/publish）。`.gitignore` 加 knowledge/。测试：issue-store(7)+publish(2)。
+- **Project Scribe（本提交）**：`knowledge/scribe.ts` `scribePrompt`（只喂 confirmed/resolved/accepted 投影，observed 不总结；禁 mutate 指令）+ `parseIssueSummaryDraft`（首标题须 `# Project Issues`）+ `validateScribeDraft`（拒含 confirm/resolve/accept/close/delete/merge finding 的草案）+ `findScribe`（V5 图 observe 边找 documenter）+ `summarizeWithScribe`（invoke scribe fresh → parse → validate → 返回草案；exec 失败/无草案/无 scribe → null 回退确定性模板）。`publish.ts` 抽出共享 `writeProjectIssues`（路径 jail/secret scan/dirty-worktree/原子写）+ `publishIssuesDraft`（写 Scribe 草案，同 guards）。`v5-workspace` 模板加 `__knowledge__`(project_knowledge) + `scribe`(documenter, opencode:project-scribe) + observe 边；V5_ROLES 加 project-scribe。`projects.ts` POST /issues/summarize：V5 图有 scribe → summarizeWithScribe（runAgentNode + 合成 opts）→ 草案则 publishIssuesDraft，否则回退 publishIssues。Scribe 不进主链（walkV5Graph 不处理 observe 边）。测试：scribe(8)。
 
-**累计测试 152 过**（commit #5 新增 9）；api+web typecheck 绿；web build 绿；启动烟测 /api/providers+/api/projects/default/issues（{issues:[]}）200。
+**累计测试 160 过**（commit #6 新增 8）；api+web typecheck 绿；web build 绿；启动烟测 200。
 
 ### 重要提醒
 
@@ -207,5 +208,5 @@
 
 ### 下一步
 
-- **V5 schema + Coordinator + 角色/模板 + Project Knowledge 完成（commit #3-5）**。下一步 commit #6 Scribe（opencode:project-scribe 接 Knowledge observe 边）→ #7 画布/Issues UI → #8 能力策略/迁移文档。
+- **V5 schema + Coordinator + 角色/模板 + Project Knowledge + Scribe 完成（commit #3-6）**。下一步 commit #7 V5 画布四泳道 + Issues 面板 UI → #8 能力策略/迁移文档。
 

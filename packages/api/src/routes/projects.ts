@@ -43,14 +43,15 @@ import {
   transitionRunStatus,
 } from '../agents/run-registry.js';
 import { resolveInstanceDescriptorPaths } from '../agents/node-instance.js';
-import { executeGraph, runAgentNode } from '../agents/graph/AgentRouter.js';
+import { executeGraph, runAgentNode, type ExecuteOptions } from '../agents/graph/AgentRouter.js';
 import { resumeEvaluatorOptimizerGraph, verifyCheckpointToken, isAllowedResumeAction, type HarnessCheckpoint, type ResumeAction } from '../agents/graph/EvaluatorOptimizerRouter.js';
 import { invokeAgentWithPolicy } from '../agents/invoke-agent.js';
 import { buildThreadContext, buildServerContext } from '../agents/context-builder.js';
 import { snapshotRubrics } from '../agents/graph/evaluation.js';
 import { scaffoldV5Workspace } from '../agents/graph/v5-workspace.js';
 import { listIssues, recordFinding, confirmIssue, resolveIssue, acceptIssue, reopenIssue, IssueError } from '../agents/knowledge/issue-store.js';
-import { publishIssues, PublishError } from '../agents/knowledge/publish.js';
+import { publishIssues, publishIssuesDraft, PublishError } from '../agents/knowledge/publish.js';
+import { summarizeWithScribe } from '../agents/knowledge/scribe.js';
 import {
   closeRunStream,
   listRuns,
@@ -997,6 +998,21 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
   });
   app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/issues/publish', async (request, reply) => {
     try { return publishIssues(request.params.projectId); } catch (err) {
+      const code = err instanceof PublishError ? 409 : 400;
+      return reply.code(code).send({ error: (err as Error).message });
+    }
+  });
+  app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/issues/summarize', async (request, reply) => {
+    const { projectId } = request.params;
+    try {
+      const graph = readProjectGraph(projectId);
+      if (graph.schemaVersion === 5) {
+        const opts: ExecuteOptions = { runId: `scribe-${Date.now()}`, projectId, emit: () => {}, record: () => {} };
+        const draft = await summarizeWithScribe(projectId, graph, runAgentNode, opts);
+        if (draft) return publishIssuesDraft(projectId, draft);
+      }
+      return publishIssues(projectId);
+    } catch (err) {
       const code = err instanceof PublishError ? 409 : 400;
       return reply.code(code).send({ error: (err as Error).message });
     }

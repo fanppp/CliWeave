@@ -45,6 +45,7 @@ export const V5_ROLES: V5Role[] = [
   { nodeKey: 'claude:verify', name: '验证', provider: 'claude', identity: '# 验证\n\n最终验证：运行测试 / 校验产物满足验收标准。输出 JSON Evaluation。\n', decision: true },
   { nodeKey: 'opencode:review-analyst', name: '审查分析师', provider: 'opencode', model: 'alibaba-cn/glm-5.2', identity: '# 审查分析师\n\n处理 review_only 通道：对已有代码/产物做审查分析，产出审查报告，不修改。\n' },
   { nodeKey: 'opencode:verify-analyst', name: '验证分析师', provider: 'opencode', model: 'alibaba-cn/glm-5.2', identity: '# 验证分析师\n\n处理 verify_only 通道：对已有产物做验证分析（测试/校验），产出验证报告，不修改。\n' },
+  { nodeKey: 'opencode:project-scribe', name: '项目 Scribe', provider: 'opencode', model: 'alibaba-cn/glm-5.2', identity: '# 项目 Scribe\n\n你是可选的 documenter 节点，接 Knowledge observe 边。不进主链、不影响 run 成败。只把 confirmed/resolved/accepted 问题总结为 ISSUE_SUMMARY_DRAFT（Markdown），不确认/关闭/删除/合并任何 finding。每次 fresh session。\n' },
 ];
 
 /** V5 默认图模板（7 通道 + 高风险 security gate；clarify/unsupported 由 router 决策，不需 route 边）。 */
@@ -79,6 +80,8 @@ export function getDefaultV5ProjectGraph(): GraphV5 {
       { id: 'verify', type: 'decision', agentNodeKey: verify, rubricRef: 'rubric.json' },
       { id: 'review-analyst', type: 'agent', agentNodeKey: reviewAnalyst },
       { id: 'verify-analyst', type: 'agent', agentNodeKey: verifyAnalyst },
+      { id: '__knowledge__', type: 'project_knowledge' },
+      { id: 'scribe', type: 'documenter', agentNodeKey: 'opencode:project-scribe' },
       { id: '__end__', type: 'end' },
     ],
     edges: [
@@ -104,6 +107,7 @@ export function getDefaultV5ProjectGraph(): GraphV5 {
       { id: 'rework-verify', source: 'verify', target: 'implementer', kind: 'rework' },
       { id: 'review-analyst->end', source: 'review-analyst', target: '__end__', kind: 'forward' },
       { id: 'verify-analyst->end', source: 'verify-analyst', target: '__end__', kind: 'forward' },
+      { id: 'observe-scribe', source: '__knowledge__', target: 'scribe', kind: 'observe' },
     ],
   };
 }
