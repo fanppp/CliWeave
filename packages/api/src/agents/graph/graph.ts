@@ -475,8 +475,16 @@ function validateV5Topology(graph: GraphV5): void {
   }
   for (const node of graph.nodes) {
     if (node.type === 'agent') {
-      const forward = graph.edges.filter((e) => e.kind === 'forward' && e.source === node.id);
-      if (forward.length > 1) throw new GraphValidationError(`work '${node.id}' has more than one forward edge`);
+      // V5: 同一 lane 下每 work 最多一个有效 forward（无 lanes 视为永远活跃，不与其它 forward 共存）。
+      const forward = graph.edges.filter((e): e is Extract<GraphV5['edges'][number], { kind: 'forward' }> => e.kind === 'forward' && e.source === node.id);
+      const alwaysOn = forward.filter((e) => !e.lanes || e.lanes.length === 0);
+      if (alwaysOn.length > 1) throw new GraphValidationError(`work '${node.id}' has more than one always-on forward edge`);
+      if (alwaysOn.length === 1 && forward.length > 1) throw new GraphValidationError(`work '${node.id}' always-on forward cannot coexist with lane-scoped forwards`);
+      const laneFwd = new Set<RouteLane>();
+      for (const f of forward) for (const lane of f.lanes ?? []) {
+        if (laneFwd.has(lane)) throw new GraphValidationError(`lane '${lane}' has multiple forward edges from work '${node.id}'`);
+        laneFwd.add(lane);
+      }
       const gates = graph.edges.filter((e): e is Extract<GraphV5['edges'][number], { kind: 'gate' }> => e.kind === 'gate' && e.source === node.id);
       const orders = new Set(gates.map((e) => e.order));
       if (orders.size !== gates.length) throw new GraphValidationError(`work '${node.id}' has duplicate gate order`);

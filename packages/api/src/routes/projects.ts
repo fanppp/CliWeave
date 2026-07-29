@@ -48,6 +48,7 @@ import { resumeEvaluatorOptimizerGraph, verifyCheckpointToken, isAllowedResumeAc
 import { invokeAgentWithPolicy } from '../agents/invoke-agent.js';
 import { buildThreadContext, buildServerContext } from '../agents/context-builder.js';
 import { snapshotRubrics } from '../agents/graph/evaluation.js';
+import { scaffoldV5Workspace } from '../agents/graph/v5-workspace.js';
 import {
   closeRunStream,
   listRuns,
@@ -112,7 +113,9 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
     // path 留空 → 与 default 同路径（CliWeave 根）
     try {
       const meta = createProject(name, path || undefined);
-      return reply.code(201).send(meta);
+      // 新项目默认脚手架 V5 Project Workspace（角色节点 + 7 通道图）。既有项目/test 不自动升级。
+      const scaffold = scaffoldV5Workspace(meta.id);
+      return reply.code(201).send({ ...meta, scaffold });
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });
     }

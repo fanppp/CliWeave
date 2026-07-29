@@ -149,7 +149,7 @@ async function walkLane(
     firstWork = false;
     let candidate = makeCandidate(); candidates.push(candidate);
     emitBoth({ type: 'candidate_produced', runId, branchId: 'main', candidate, timestamp: Date.now() });
-    const gates = graph.edges.filter((e): e is Extract<GraphV5Edge, { kind: 'gate' }> => e.kind === 'gate' && e.source === node.id).sort((a, b) => a.order - b.order);
+    const gates = graph.edges.filter((e): e is Extract<GraphV5Edge, { kind: 'gate' }> => e.kind === 'gate' && e.source === node.id && (!e.lanes || e.lanes.includes(plan.lane))).sort((a, b) => a.order - b.order);
     const gateCounts: Record<string, number> = {};
     let gateIndex = 0;
     let degraded = false;

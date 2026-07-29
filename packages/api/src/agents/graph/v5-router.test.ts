@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { walkV5Graph } from './V5Router.js';
+import { getDefaultV5ProjectGraph } from './v5-workspace.js';
 import type { ExecNode, ExecuteOptions } from './AgentRouter.js';
 import type { GraphV5 } from './graph.js';
 import type { Rubric, Evaluation } from './evaluation.js';
@@ -135,5 +136,41 @@ describe('V5 Router + Coordinator runner', () => {
     const done = publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_done' }> => e.type === 'run_done');
     assert.equal(done?.termination, 'needs_input');
     assert.equal(publicEvents.some((e) => e.type === 'run_plan_created'), false);
+  });
+});
+
+describe('V5 default workspace template lanes', () => {
+  async function runTemplate(routerQueue: RouteDecision[], decisions: Record<string, ('approve' | 'revise' | 'malformed')[]>, agentOutputs: Record<string, string[]> = {}) {
+    const scripted = v5Exec(routerQueue, decisions, agentOutputs);
+    const publicEvents: PublicGraphEvent[] = [];
+    const persisted: PersistedRunEvent[] = [];
+    const graph = getDefaultV5ProjectGraph();
+    const rubrics = Object.fromEntries(graph.nodes.filter((n) => n.type === 'decision').map((n) => [n.id, { rubricRef: n.rubricRef!, hash: 'test', rubric }] as const));
+    const opts: ExecuteOptions = { runId: 'run-v5tpl', projectId: 'test-project', emit: (e) => publicEvents.push(e), record: (e) => persisted.push(e), rubrics };
+    await walkV5Graph('implement feature', graph, opts, scripted.exec, 'auto');
+    return { publicEvents, calls: scripted.calls };
+  }
+
+  it('small_change skips the Security Reviewer gate (planned_change-only)', async () => {
+    const { publicEvents, calls } = await runTemplate(
+      [decision('small_change', { sideEffects: 'project_write', risk: 'medium' })],
+      { 'code-review': ['approve'], verify: ['approve'] },
+      { implementer: ['impl-artifact'] },
+    );
+    assert.equal(calls.some((c) => c.nodeId === 'security-review'), false);
+    assert.equal(calls.some((c) => c.nodeId === 'code-review'), true);
+    assert.equal(calls.some((c) => c.nodeId === 'verify'), true);
+    const done = publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_done' }> => e.type === 'run_done');
+    assert.equal(done?.termination, 'completed');
+  });
+
+  it('planned_change runs Architect → Plan Review → Implementer → Code/Security/Verify', async () => {
+    const { calls } = await runTemplate(
+      [decision('planned_change', { sideEffects: 'project_write', risk: 'high' })],
+      { 'plan-review': ['approve'], 'code-review': ['approve'], 'security-review': ['approve'], verify: ['approve'] },
+      { architect: ['plan-artifact'], implementer: ['impl-artifact'] },
+    );
+    assert.deepEqual(calls.map((c) => c.nodeId).filter((id) => ['architect', 'plan-review', 'implementer', 'code-review', 'security-review', 'verify'].includes(id)),
+      ['architect', 'plan-review', 'implementer', 'code-review', 'security-review', 'verify']);
   });
 });
