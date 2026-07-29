@@ -163,12 +163,18 @@
 | **Project Scribe** | opencode:project-scribe GLM-5.2 可选 documenter 接 Knowledge observe 边 + 不进主链/不影响 run 成败 + 只输出 ISSUE_SUMMARY_DRAFT + 无 Scribe 时 IssueProjector 确定性模板 | ✅ 完成（本提交） | — |
 | **V5 画布/Issues UI** | 四泳道 Direct/Investigation/Engineering/Knowledge + Router 显示 lane/risk/confidence + Knowledge open/resolved 数 + Scribe 状态 + Issues 面板 | ✅ 完成（本提交） | — |
 | **能力策略/迁移文档** | 应用层 CapabilityPolicy（projectRead/Write、commandExec、network、externalSideEffects 各角色）+ V3→legacy/V4→保持/V4→V5 预览式显式升级 + OpenCode/Claude 不构成硬隔离 | ✅ 完成（本提交，见 `docs/CAPABILITY_AND_MIGRATION.md`） | — |
+| **V5 边激活修正（#9）** | `isEdgeActive(edge,lane,risk?)` 统一（resolveLanePlan/walkLane/validateV5Runnable 共用）——修复 minRisk 此前被忽略：planned_change+medium 跳 Security、high/critical 必经；small_change 不激活 planned_change-only Security；run_plan_created.gateNodeIds 与运行时 walkLane 完全一致 + PUT 拒 V4→V3 降级 | ✅ 完成 | `ae67227` |
+| **V5 durable gate pause/resume（#10）** | `DurableCheckpoint` 联合（V4 HarnessCheckpoint + V5GateCheckpoint，runner/kind 判别；旧 JSONL 无 runner/kind 回退 v4-gate 不破坏重放）+ verifyDurableToken/allowedDurableActions + V5 onExhausted/onBlocked=ask_user→durable pause（落盘 branch_checkpoint+run_state，run_paused pauseKind:'gate'，token 只经 WS）+ resume best/revise/fail（不重跑已完成 work）+ resume 路由分流 v4/v5 | ✅ 完成 | `48bfa99` |
+| **V5 durable clarify pause/resume（#11）** | V5ClarifyCheckpoint + run_paused pauseKind:'clarify' + clarify 不再终态 needs_input 而是 durable pause（保存 routeDecision/originalPrompt/clarificationAttempts）+ resume 补充文本同 run 同 turn 重跑 Router，非 clarify→proceed，仍 clarify+attempts<2→再暂停，>=2→run_error；unsupported 仍终态 | ✅ 完成 | `f45b5f9` |
+| **RunEntry 从节点启动（#12）** | RunEntry{input|work(node_only/downstream,lane?,risk?,artifactRef?)} + normalizeRunEntry（节点须 agent、downstream 拒 V3、V5 多 lane 须显式/唯一 lane 推导、写通道 risk 默认 high）+ resolveDownstreamPlan + runNodeOnly（V3/V4/V5 共用单节点）+ V4 startNodeId/V5 manual_downstream + run_plan_created.source:'router'\|'manual_entry' + artifactRef SHA-256 校验入不可变 run_meta | ✅ 完成 | `d393991` |
+| **V4→V5 迁移服务（#13）** | migration-v5.ts：preview（无 roleMap→requiresMapping 不猜测；候选校验+哈希+复用/新建+confirmToken 入 staged journal）/apply（源哈希不一致→409、有活跃 run→409、staging 脚手架+V5 校验+备份+forced 写）/rollback（当前图==产物才允许，恢复 V4+trash 新建）+ journal(.graph-migrations.local.json gitignored) + `assertNoSchemaChange`（PUT 拒任意 schema 变更——降级 AND 升级）+ `writeProjectGraphForced`（迁移专用绕过守卫） | ✅ 完成 | `456f07e` |
+| **system-improvement V4→V5 迁移（#14）** | 用 #13 服务把正式画布 V4→V5（固定 roleMap，复用 6 节点不改名保留 session：architect/plan-reviewer/implementer/code-reviewer/verifier/scribe + 新建 6：router/responder/investigator/security-review/review-analyst/verify-analyst）+ graph.json V5（7 lane+Security+Knowledge+Scribe）+ 7 节点 node.json/config 纳入提交；runtime/CLI home/Thread/Knowledge/runs 仍不跟踪；test/ 不动 | ✅ 完成 | `c92f126` |
 
 ### 三问状态
 
 - **Q2 多轮记忆**：✅ **后端完成**（Step 2+3）。Thread 事件源 + ContextBuilder 把"最近 8 轮 Q&A + summary + pins + serverContext"前置注入每个节点 prompt，历史 `[untrusted data]` 包裹防注入、超预算裁最旧；永不裁 system/当前消息/上游 payload。每个 work 节点 fresh 跑，靠构造 prompt 携带跨轮记忆。前端未接线（Step 7/commit #7）。
 - **Q1 智能终止**：🟢 **V4 auto-route 早结束 + V4.1 已硬化 + V4.3 完成质量 Payload**（FINISH simple_answer→early_complete；空 artifact 重试；unsafe_category 强制 forward；空输出不进 gate；run_done 带 RunQuality{status,exhausted,bestCandidateId,unresolvedGateIds}；continue_best 保留未解决 gate）。完整 CompletionClaim disposition + branch 级早结束留 V5 Coordinator。
-- **Q3 从节点开始**：❌ 未动（V5 RunEntry / commit #3-4）。注：Step 1B 的 `POST /api/projects/:pid/nodes` 是创建节点**实例**，不是"从某节点发起 run"。
+- **Q3 从节点开始**：✅ **完成（#12 RunEntry）**。`{kind:'input'}` 默认走整图（兼容现有客户端）；`{kind:'work',mode:'node_only'}` 单节点 fresh 一次不跑 gate/下游（V3/V4/V5 共用）；`{kind:'work',mode:'downstream'}` 从该 work 跑 gate+forward（V4 startNodeId / V5 manual_downstream）；V5 多 lane 须显式 lane、写通道 risk 默认 high；artifactRef SHA-256 校验同项目历史产物作节点输入；run_plan_created.source:'router'|'manual_entry'。注：Step 1B 的 `POST /api/projects/:pid/nodes` 是创建节点**实例**，不是 RunEntry。
 
 ### 关键设计决策（已锁定）
 
@@ -199,7 +205,19 @@
 - **V5 画布/Issues UI（本提交）**：Web `GraphNode`/`GraphEdge`/`Graph` 类型加 V5（router/project_knowledge/documenter + route/observe + lanes/minRisk + schemaVersion 5）。`graphRunStore` 加 `lastPlan`（run_plan_created 置入）+ Issues tab。`IssuesPanel` + `issuesStore`（zustand）：GET /issues + confirm/resolve/accept/reopen + Publish + Summarize 按钮；按 open/closed 分组 + severity + source + occurrences。`GraphCanvas` 加 RouterNode/KnowledgeNode/DocumenterNode 三类节点（Knowledge 显示 open/closed 计数，Documenter 显示 Summarize 状态）+ `v5LaneOf` 泳道自动布局（Direct/Investigation/Engineering/Knowledge 分列）+ route/observe 边样式（紫/绿虚线）+ buildGraph save-back 保留 V5 schemaVersion + lanes/minRisk。`GraphRunPanel` 加 lastPlan 决策 chip（lane/risk/confidence/重路由）。测试：无单测（前端），web typecheck+build 绿；运行时烟测：建 V5 项目→scaffold 12 角色（含 scribe）→graph schemaVersion 5→/issues 200。
 - **能力策略/迁移文档（本提交）**：新增 `docs/CAPABILITY_AND_MIGRATION.md`——应用层 CapabilityProfile 各角色矩阵（Router/Responder/Scribe 无工具；Investigator/Architect/Reviewer 只读；Implementer 读写+执行（critical 降 test + 外部副作用 human_approval）；Verifier 读+测试）+ "OpenCode/Claude 不构成硬隔离，cwd 非安全边界，硬隔离须容器/OS sandbox 独立实施" + V3→legacy/V4→保持/V4→V5 预览式显式升级（普通 PUT 拒降级、stable edge ID、test 不参与升级、缺 Provider 明确报告）+ V4→V5 迁移向导草案。
 
-**累计测试 160 过**；api+web typecheck 绿；web build 绿；运行时烟测 V5 项目 scaffold+graph+issues 全通。**V4 稳定化（V4.1-V4.5）+ V5（schema/Coordinator/角色模板/Knowledge/Scribe/画布 UI）+ 能力策略/迁移文档全部完成。**
+- **V5 闭环批次（commit #9-14，详见上方进度表）**：
+  - **#9 边激活修正**：`isEdgeActive(edge,lane,risk?)` 在 graph.ts 提取，resolveLanePlan/walkLane/validateV5Runnable 共用，修复 minRisk 被忽略（Security gate 现按风险激活）；PUT 降级保护泛化（V5→V4/V3、V4→V3 拒）。
+  - **#10 V5 durable gate pause/resume**：新建 `checkpoint.ts`（DurableCheckpoint = HarnessCheckpoint|V5GateCheckpoint，runner/kind 判别；parseDurableCheckpoint 旧 V4 无 runner/kind 回退 v4-gate；verifyDurableToken 恒定时间+过期；allowedDurableActions）；V5Router walkLane 加 pause/resume（镜像 V4 walkBranch：onExhausted/onBlocked=ask_user→pause，fail→run_error；resume best/revise/fail 不重跑已完成 work）；run_paused 加 pauseKind:'gate'；projects resume 路由分流 v4/v5。
+  - **#11 V5 durable clarify pause/resume**：V5ClarifyCheckpoint + run_paused pauseKind:'clarify'；clarify 不再终态 needs_input 而是 durable pause；resume 补充文本同 run 同 turn 重跑 Router，非 clarify→proceed，仍 clarify+attempts<2→再暂停，>=2→run_error；unsupported 仍终态；projects resume 路由接 userResponse。
+  - **#12 RunEntry**：routing.ts RunEntry{input|work(node_only/downstream)}+ArtifactRef+normalizeRunEntry+resolveDownstreamPlan；AgentRouter runNodeOnly（V3/V4/V5 共用）+ executeGraph 按 entry 分流；V5Router manual_downstream（source:'manual_entry'）；V4 walkEvaluatorOptimizerGraph 加 startNodeId；run_plan_created 加 source；RunMeta/PendingRun 加 entry/entryArtifact；/run 规范化、/start resolveArtifactRef（同项目历史+SHA-256）入不可变 run_meta。
+  - **#13 V4→V5 迁移服务**：migration-v5.ts buildMigrationV5Graph/preview/apply/rollback + journal(.graph-migrations.local.json)；assertNoSchemaChange（PUT 拒任意 schema 变更——降级 AND 升级均拒，"只能经迁移/回滚服务改变 schema"）+ writeProjectGraphForced（迁移专用绕过守卫）；projects 3 路由。
+  - **#14 system-improvement 迁移**：用 #13 服务固定 roleMap 把正式画布 V4→V5（复用 6 节点不改名 + 新建 6）+ graph.json/node 配置纳入提交；runtime/test 不动。
+
+**累计测试 204 过**（V4 稳定化 160 → V5 闭环批次 +44：isEdgeActive/assertNoSchemaChange(6) + checkpoint 协议/V5 gate pause-resume(10) + V5 clarify pause-resume(3) + RunEntry normalize/downstream/node_only/manual_downstream(13) + V4→V5 迁移服务集成(8) + 杂项收敛）；api+web typecheck 绿；web build 绿；system-improvement 画布已 V5（7 lane+Security+Knowledge+Scribe 可见）。**V4 稳定化 + V5（schema/Coordinator/角色模板/Knowledge/Scribe/画布 UI）+ 能力策略/迁移文档 + V5 闭环（边激活修正/durable pause-resume/RunEntry/迁移服务/正式画布迁移）全部完成（commit #1-14）。**
+
+### 下一步
+
+- **V5 闭环批次完成（commit #9-14）**。代码路径就绪；剩余：① 真实 V5 运行时烟测（需 live CLI router/implementer 验证 #2/#3/#4/#6 E2E：1+1 走 direct_answer、planned change 经 plan/implement/review/risk-gated Security/Verify、gate+clarify 跨刷新/重启恢复、Knowledge 自动记录+Scribe+Publish）② push 全部 14 个提交（`aea8110..c92f126`）③ 容器/OS sandbox 硬隔离（应用层 CapabilityProfile 已声明，cwd 非安全边界）④ 可配置摘要生成器/语义检索（Step 8+ 增强）。
 
 ### 重要提醒
 
@@ -207,8 +225,4 @@
 - ContextBuilder 前缀当前注入**所有** agent 节点（含 decision/reviewer）；设计原指"每个 work 节点"，V5 Coordinator 可细化。
 - 无前端设置 project `location` 的 UI（`ProjectLocal.location` 字段已就位，首版始终省略）。
 - 真实 V4 运行时烟测需建 V4 图+rubric+CLI 节点（test 项目当前是 V3）；V4.1/V4.2 行为由 15 个单测全覆盖（auto finish/重试/重试失败/unsafe forward/空输出不进 gate/blocked 无 best/blocked 有 best/exhausted/malformed/非法 action）。
-
-### 下一步
-
-- **V4 稳定化 + V5 + 文档全部完成（commit #1-8）**。后续可选：V4→V5 迁移向导落地、容器/OS sandbox 硬隔离、可配置摘要生成器（Step 8 增强）、语义检索。
 
