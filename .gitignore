@@ -46,6 +46,7 @@ agents/projects/*/nodes/*/*/data/cli/
 agents/projects/*/nodes/*/*/.last-output.json
 # 迁移标记（本机状态，不跟踪）。
 agents/.migrations.local.json
+agents/.graph-migrations.local.json
 # 迁移 staging 与 trash（本机临时/可恢复）。
 agents/projects/.staging-*/
 agents/projects/.trash/

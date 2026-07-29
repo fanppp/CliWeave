@@ -54,6 +54,7 @@ import { scaffoldV5Workspace } from '../agents/graph/v5-workspace.js';
 import { listIssues, recordFinding, confirmIssue, resolveIssue, acceptIssue, reopenIssue, IssueError } from '../agents/knowledge/issue-store.js';
 import { publishIssues, publishIssuesDraft, PublishError } from '../agents/knowledge/publish.js';
 import { summarizeWithScribe } from '../agents/knowledge/scribe.js';
+import { previewMigration, applyMigration, rollbackMigration, MigrationError } from '../agents/graph/migration-v5.js';
 import {
   closeRunStream,
   listRuns,
@@ -1022,6 +1023,41 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
       });
     },
   );
+
+  // ── V4→V5 显式迁移服务（preview/apply/rollback）─────────────────
+  app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/migrations/v5/preview', async (request, reply) => {
+    const { projectId } = request.params;
+    try { readProjectMeta(projectId); } catch (err) { return reply.code(404).send({ error: (err as Error).message }); }
+    const body = (request.body ?? {}) as { roleMap?: unknown };
+    const roleMap = typeof body.roleMap === 'object' && body.roleMap !== null && !Array.isArray(body.roleMap) ? body.roleMap as Record<string, string> : undefined;
+    const result = previewMigration(projectId, roleMap);
+    if ('error' in result) return reply.code(400).send({ error: result.error });
+    if ('requiresMapping' in result) return reply.code(409).send({ requiresMapping: true, error: 'roleMap is required (refusing to guess ambiguous mapping)' });
+    return result;
+  });
+
+  app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/migrations/v5/apply', async (request, reply) => {
+    const { projectId } = request.params;
+    const body = (request.body ?? {}) as { confirmToken?: unknown };
+    if (typeof body.confirmToken !== 'string') return reply.code(400).send({ error: 'confirmToken is required' });
+    try {
+      return applyMigration(projectId, body.confirmToken);
+    } catch (err) {
+      return reply.code(err instanceof MigrationError ? 409 : 400).send({ error: (err as Error).message });
+    }
+  });
+
+  app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/migrations/v5/rollback', async (request, reply) => {
+    const { projectId } = request.params;
+    const body = (request.body ?? {}) as { migrationId?: unknown };
+    if (typeof body.migrationId !== 'string') return reply.code(400).send({ error: 'migrationId is required' });
+    try {
+      rollbackMigration(projectId, body.migrationId);
+      return { status: 'rolled_back', projectId };
+    } catch (err) {
+      return reply.code(err instanceof MigrationError ? 409 : 400).send({ error: (err as Error).message });
+    }
+  });
 
   // ── Project Knowledge: issues 账本 ─────────────────────────────
   app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/issues', async (request) => {

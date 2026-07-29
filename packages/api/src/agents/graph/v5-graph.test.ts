@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateGraph, validateRunnable, GraphValidationError, isEdgeActive, assertNoSchemaDowngrade, type GraphV5 } from './graph.js';
+import { validateGraph, validateRunnable, GraphValidationError, isEdgeActive, assertNoSchemaChange, type GraphV5 } from './graph.js';
 
 function v5(over: Partial<Pick<GraphV5, 'nodes' | 'edges'>> = {}): GraphV5 {
   const base: GraphV5 = {
@@ -102,16 +102,19 @@ describe('isEdgeActive (lanes + minRisk)', () => {
   });
 });
 
-describe('assertNoSchemaDowngrade (PUT 降级保护)', () => {
-  it('rejects V5→V4, V5→V3, V4→V3', () => {
-    assert.throws(() => assertNoSchemaDowngrade(5, 4), /downgrade/);
-    assert.throws(() => assertNoSchemaDowngrade(5, 3), /downgrade/);
-    assert.throws(() => assertNoSchemaDowngrade(4, 3), /downgrade/);
+describe('assertNoSchemaChange (PUT schema 变更保护)', () => {
+  it('rejects downgrades V5→V4, V5→V3, V4→V3', () => {
+    assert.throws(() => assertNoSchemaChange(5, 4), /change graph schema/);
+    assert.throws(() => assertNoSchemaChange(5, 3), /change graph schema/);
+    assert.throws(() => assertNoSchemaChange(4, 3), /change graph schema/);
   });
-  it('allows same-version edits and upgrades via PUT (upgrades blocked later by migration service)', () => {
-    assert.doesNotThrow(() => assertNoSchemaDowngrade(5, 5));
-    assert.doesNotThrow(() => assertNoSchemaDowngrade(4, 4));
-    assert.doesNotThrow(() => assertNoSchemaDowngrade(3, 4));
-    assert.doesNotThrow(() => assertNoSchemaDowngrade(4, 5));
+  it('rejects upgrades via PUT (V3→V4, V4→V5) — must use migration service', () => {
+    assert.throws(() => assertNoSchemaChange(3, 4), /change graph schema/);
+    assert.throws(() => assertNoSchemaChange(4, 5), /change graph schema/);
+  });
+  it('allows same-version edits', () => {
+    assert.doesNotThrow(() => assertNoSchemaChange(5, 5));
+    assert.doesNotThrow(() => assertNoSchemaChange(4, 4));
+    assert.doesNotThrow(() => assertNoSchemaChange(3, 3));
   });
 });

@@ -591,22 +591,32 @@ export function readProjectGraph(projectId: string): AnyGraph {
 }
 
 /**
- * PUT 编辑不得降级 schema：V5→V4/V3、V4→V3 均拒（"只能经显式迁移/回滚服务改变 schema"）。
- * 升级（V3→V4/V5、V4→V5）当前仍允许经 PUT；#13 迁移服务落地后改为仅同版本编辑，升级走迁移服务。
+ * PUT 编辑不得改变 schema 版本：V5→V4/V3、V4→V3 降级 AND V3→V4/V5、V4→V5 升级均拒（"只能经显式迁移/回滚服务改变 schema"）。
+ * 迁移服务 apply/rollback 用 writeProjectGraphForced 绕过此守卫。
  */
-export function assertNoSchemaDowngrade(existingVersion: number, newVersion: number): void {
-  if (newVersion < existingVersion) {
-    throw new GraphValidationError(`refusing to downgrade graph from V${existingVersion} to V${newVersion} (use the explicit migration wizard)`);
+export function assertNoSchemaChange(existingVersion: number, newVersion: number): void {
+  if (newVersion !== existingVersion) {
+    throw new GraphValidationError(`refusing to change graph schema from V${existingVersion} to V${newVersion} via PUT (use the explicit migration wizard)`);
   }
 }
 
-/** 原子写入画布图（强制 projectId）。拒绝降级（V5→V4/V3、V4→V3；须用显式迁移向导）。 */
+/** 原子写入画布图（强制 projectId）。拒绝任意 schema 版本变更（须用显式迁移向导）。 */
 export function writeProjectGraph(projectId: string, graph: AnyGraph): void {
   const parsed = GraphSchema.parse(graph);
   validateGraph(parsed);
   const file = projectGraphFile(projectId);
   const existing = existsSync(file) ? parseGraphRaw(JSON.parse(readFileSync(file, 'utf-8').replace(/^\uFEFF/, '') ?? '{}')) : null;
-  if (existing) assertNoSchemaDowngrade(existing.schemaVersion, parsed.schemaVersion);
+  if (existing) assertNoSchemaChange(existing.schemaVersion, parsed.schemaVersion);
+  const tmp = `${file}.tmp`;
+  writeFileSync(tmp, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
+  renameSync(tmp, file);
+}
+
+/** 迁移服务专用：绕过 schema 变更守卫原子写入（仅 preview/apply/rollback 调用，不暴露给普通 PUT）。 */
+export function writeProjectGraphForced(projectId: string, graph: AnyGraph): void {
+  const parsed = GraphSchema.parse(graph);
+  validateGraph(parsed);
+  const file = projectGraphFile(projectId);
   const tmp = `${file}.tmp`;
   writeFileSync(tmp, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
   renameSync(tmp, file);
