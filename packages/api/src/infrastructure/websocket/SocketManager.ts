@@ -57,7 +57,7 @@ export type PublicGraphEvent =
   | { type: 'gate_status'; runId: string; branchId: string; gateId: string; status: 'running' | 'approved' | 'exhausted' | 'blocked'; timestamp: number }
   | { type: 'gate_blocked'; runId: string; branchId: string; gateId: string; candidateId: string; reason: string; timestamp: number }
   | { type: 'candidate_rejected'; runId: string; branchId: string; gateId: string; candidateId: string; verdict: 'revise' | 'blocked'; timestamp: number }
-  | { type: 'run_paused'; runId: string; projectId: string; branchId: string; gateId: string; question: string; options: ('continue_best' | 'revise_once' | 'fail')[]; resumeToken: string; expiresAt: number }
+  | { type: 'run_paused'; runId: string; projectId: string; branchId: string; pauseKind: 'gate'; gateId: string; question: string; options: ('continue_best' | 'revise_once' | 'fail')[]; resumeToken: string; expiresAt: number }
   | { type: 'run_resumed'; runId: string; branchId: string; gateId: string }
   | { type: 'resume_rejected'; runId: string; branchId: string; reason: string; timestamp: number }
   | { type: 'thread_committed'; runId: string; threadId: string; turnId: string; revision: number; status: 'completed' | 'failed' }

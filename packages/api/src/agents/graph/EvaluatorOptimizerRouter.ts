@@ -9,6 +9,8 @@ import type { ExecNode, ExecuteOptions } from './AgentRouter.js';
 import type { RunQuality } from '../../infrastructure/websocket/SocketManager.js';
 
 export interface HarnessCheckpoint {
+  runner: 'v4';
+  kind: 'gate';
   schemaVersion: 1;
   prompt: string;
   branchId: string;
@@ -78,13 +80,13 @@ export async function walkEvaluatorOptimizerGraph(prompt: string, graph: GraphV4
     return exec(node, (opts.contextPrefix ?? '') + nodePrompt, opts, { iteration, sessionPolicy: policy });
   }
 
-  async function pause(branchId: string, gateId: string, checkpoint: Omit<HarnessCheckpoint, 'schemaVersion' | 'tokenHash' | 'expiresAt'>): Promise<BranchResult> {
+  async function pause(branchId: string, gateId: string, checkpoint: Omit<HarnessCheckpoint, 'schemaVersion' | 'tokenHash' | 'expiresAt' | 'runner' | 'kind'>): Promise<BranchResult> {
     const token = randomBytes(32).toString('base64url');
     const expiresAt = Date.now() + 24 * 60 * 60 * 1000;
-    const payload: HarnessCheckpoint = { schemaVersion: 1, ...checkpoint, tokenHash: tokenHash(token), expiresAt };
+    const payload: HarnessCheckpoint = { runner: 'v4', kind: 'gate', schemaVersion: 1, ...checkpoint, tokenHash: tokenHash(token), expiresAt };
     record?.({ type: 'branch_checkpoint', runId, branchId, payload });
     record?.({ type: 'run_state', runId, phase: 'paused', payload: { branchId, gateId, status: 'paused', pauseReason: payload.pauseReason, allowedActions: payload.allowedActions, ...(payload.bestCandidateId ? { bestCandidateId: payload.bestCandidateId } : {}) } });
-    emit({ type: 'run_paused', runId, projectId, branchId, gateId, question: '审核预算耗尽或评估阻塞，请选择后续动作', options: payload.allowedActions, resumeToken: token, expiresAt });
+    emit({ type: 'run_paused', runId, projectId, branchId, pauseKind: 'gate', gateId, question: '审核预算耗尽或评估阻塞，请选择后续动作', options: payload.allowedActions, resumeToken: token, expiresAt });
     return { status: 'paused' };
   }
 

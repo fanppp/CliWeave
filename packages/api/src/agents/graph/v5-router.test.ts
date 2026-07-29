@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { walkV5Graph } from './V5Router.js';
+import { walkV5Graph, resumeV5Graph } from './V5Router.js';
+import { parseDurableCheckpoint, isV5GateCheckpoint, type V5GateCheckpoint } from './checkpoint.js';
 import { getDefaultV5ProjectGraph } from './v5-workspace.js';
 import type { ExecNode, ExecuteOptions } from './AgentRouter.js';
 import type { GraphV5 } from './graph.js';
@@ -172,5 +173,74 @@ describe('V5 default workspace template lanes', () => {
     );
     assert.deepEqual(calls.map((c) => c.nodeId).filter((id) => ['architect', 'plan-review', 'implementer', 'code-review', 'security-review', 'verify'].includes(id)),
       ['architect', 'plan-review', 'implementer', 'code-review', 'security-review', 'verify']);
+  });
+});
+
+describe('V5 durable gate pause/resume', () => {
+  function checkpointOf(persisted: PersistedRunEvent[]): V5GateCheckpoint | undefined {
+    const cp = [...persisted].reverse().find((e) => e.type === 'branch_checkpoint');
+    return cp && cp.type === 'branch_checkpoint' ? parseDurableCheckpoint(cp.payload) as V5GateCheckpoint : undefined;
+  }
+  function resumeOpts(events: { publicEvents: PublicGraphEvent[]; persisted: PersistedRunEvent[] }, exec: ExecNode): ExecuteOptions {
+    const rubrics = Object.fromEntries(v5Graph().nodes.filter((n) => n.type === 'decision').map((n) => [n.id, { rubricRef: n.rubricRef!, hash: 'test', rubric }] as const));
+    return { runId: 'run-v5', projectId: 'test-project', emit: (e) => events.publicEvents.push(e), record: (e) => events.persisted.push(e), rubrics };
+  }
+
+  it('gate exhausted (ask_user) pauses with best → continue_best/revise_once/fail', async () => {
+    const scripted = v5Exec([decision('small_change', { sideEffects: 'project_write', risk: 'medium' })], { 'code-review': ['revise', 'revise'] }, { implementer: ['impl-artifact'] });
+    const { publicEvents, persisted } = await run(v5Graph(), scripted.exec);
+    const paused = publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_paused' }> => e.type === 'run_paused');
+    assert.equal(paused?.pauseKind, 'gate');
+    assert.deepEqual(paused?.options, ['continue_best', 'revise_once', 'fail']);
+    assert.equal(publicEvents.some((e) => e.type === 'run_done'), false); // paused, 未 done
+    const cp = checkpointOf(persisted);
+    assert.equal(cp?.pauseReason, 'exhausted');
+    assert.equal(isV5GateCheckpoint(cp!), true);
+    assert.ok(cp?.bestCandidateId);
+  });
+
+  it('gate blocked (malformed) pauses without best → revise_once/fail only', async () => {
+    const scripted = v5Exec([decision('small_change', { sideEffects: 'project_write', risk: 'medium' })], { 'code-review': ['malformed', 'malformed'] });
+    const { publicEvents, persisted } = await run(v5Graph(), scripted.exec);
+    const paused = publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_paused' }> => e.type === 'run_paused');
+    assert.equal(paused?.pauseKind, 'gate');
+    assert.deepEqual(paused?.options, ['revise_once', 'fail']); // blocked candidate 被排除 → 无 best
+    const cp = checkpointOf(persisted);
+    assert.equal(cp?.pauseReason, 'malformed');
+    assert.equal(cp?.bestCandidateId, undefined);
+  });
+
+  it('resume continue_best skips the gate and completes best_effort', async () => {
+    const scripted = v5Exec([decision('small_change', { sideEffects: 'project_write', risk: 'medium' })], { 'code-review': ['revise', 'revise'] }, { implementer: ['impl-artifact'] });
+    const { persisted } = await run(v5Graph(), scripted.exec);
+    const cp = checkpointOf(persisted)!;
+    const ev: { publicEvents: PublicGraphEvent[]; persisted: PersistedRunEvent[] } = { publicEvents: [], persisted: [] };
+    await resumeV5Graph('implement feature', v5Graph(), resumeOpts(ev, scripted.exec), cp, 'continue_best', scripted.exec);
+    assert.ok(ev.publicEvents.some((e) => e.type === 'run_resumed'));
+    const done = ev.publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_done' }> => e.type === 'run_done');
+    assert.equal(done?.termination, 'best_effort');
+    assert.equal(done?.quality?.status, 'best_effort');
+    assert.ok(done?.quality?.unresolvedGateIds?.includes('gate-code'));
+  });
+
+  it('resume fail returns run_error', async () => {
+    const scripted = v5Exec([decision('small_change', { sideEffects: 'project_write', risk: 'medium' })], { 'code-review': ['revise', 'revise'] }, { implementer: ['impl-artifact'] });
+    const { persisted } = await run(v5Graph(), scripted.exec);
+    const cp = checkpointOf(persisted)!;
+    const ev: { publicEvents: PublicGraphEvent[]; persisted: PersistedRunEvent[] } = { publicEvents: [], persisted: [] };
+    await resumeV5Graph('implement feature', v5Graph(), resumeOpts(ev, scripted.exec), cp, 'fail', scripted.exec);
+    assert.ok(ev.publicEvents.some((e) => e.type === 'run_error'));
+  });
+
+  it('resume revise_once re-invokes work and re-evaluates from first gate → completed', async () => {
+    const scripted = v5Exec([decision('small_change', { sideEffects: 'project_write', risk: 'medium' })], { 'code-review': ['revise', 'revise'] }, { implementer: ['impl-artifact'] });
+    const { persisted } = await run(v5Graph(), scripted.exec);
+    const cp = checkpointOf(persisted)!;
+    const scripted2 = v5Exec([], { 'code-review': ['approve'] }, { implementer: ['impl-revised'] });
+    const ev: { publicEvents: PublicGraphEvent[]; persisted: PersistedRunEvent[] } = { publicEvents: [], persisted: [] };
+    await resumeV5Graph('implement feature', v5Graph(), resumeOpts(ev, scripted2.exec), cp, 'revise_once', scripted2.exec);
+    assert.ok(scripted2.calls.some((c) => c.nodeId === 'implementer')); // work 被重新调用
+    const done = ev.publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_done' }> => e.type === 'run_done');
+    assert.equal(done?.termination, 'completed'); // approve → completed
   });
 });

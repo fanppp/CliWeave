@@ -228,7 +228,7 @@ describe('V4.2 blocked / best-candidate resume actions', () => {
 
   it('resume rejects a disallowed action via isAllowedResumeAction', () => {
     const noBest: HarnessCheckpoint = {
-      schemaVersion: 1, prompt: '', branchId: 'b', workNodeId: 'w', upstreamArtifact: '',
+      runner: 'v4', kind: 'gate', schemaVersion: 1, prompt: '', branchId: 'b', workNodeId: 'w', upstreamArtifact: '',
       candidates: [], currentCandidateId: 'c', gateIndex: 0, gateCounts: {}, degraded: false,
       tokenHash: 'x', expiresAt: Date.now() + 1000, allowedActions: ['revise_once', 'fail'], pauseReason: 'blocked',
     };
