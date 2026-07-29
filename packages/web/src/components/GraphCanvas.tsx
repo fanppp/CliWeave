@@ -300,7 +300,7 @@ function toFlowEdges(graph: Graph | null, backIds: Set<string>): FlowEdge[] {
     const isGate = kind === 'gate';
     const isRoute = kind === 'route';
     const isObserve = kind === 'observe';
-    const sourceHandle = isBack ? (graph.schemaVersion === 4 ? 'rework-out' : 'back-out') : isGate ? 'gate-out' : isRoute ? 'route-out' : isObserve ? 'observe-out' : 'out';
+    const sourceHandle = isBack ? (graph.schemaVersion === 3 ? 'back-out' : 'rework-out') : isGate ? 'gate-out' : isRoute ? 'route-out' : isObserve ? 'observe-out' : 'out';
     const targetHandle = isBack ? 'back-in' : isGate ? 'gate-in' : isObserve ? 'observe-in' : 'in';
     const stroke = isBack ? '#f87171' : isGate ? '#60a5fa' : isRoute ? '#a78bfa' : isObserve ? '#34d399' : '#9aa3ad';
     return {
@@ -437,7 +437,11 @@ export function GraphCanvas() {
     setEdges((eds) => {
       // 同向重复（如已有 A→B 又画 A→B）静默忽略，避免落 400 后画布残留坏边
       if (eds.some((e) => e.source === c.source && e.target === c.target)) return eds;
-      const kind = graph?.schemaVersion === 4 ? (c.sourceHandle === 'gate-out' ? 'gate' : c.sourceHandle === 'rework-out' ? 'rework' : 'forward') : undefined;
+      const kind = graph?.schemaVersion === 5
+        ? (c.sourceHandle === 'route-out' ? 'route' : c.sourceHandle === 'gate-out' ? 'gate' : c.sourceHandle === 'rework-out' ? 'rework' : c.sourceHandle === 'observe-out' ? 'observe' : 'forward')
+        : graph?.schemaVersion === 4
+          ? (c.sourceHandle === 'gate-out' ? 'gate' : c.sourceHandle === 'rework-out' ? 'rework' : 'forward')
+          : undefined;
       const gateOrder = kind === 'gate' ? eds.filter((e) => e.source === c.source && e.kind === 'gate').length + 1 : undefined;
       return addEdge<FlowEdge>({ ...c, id: `${c.source}->${c.target}`, markerEnd: { type: MarkerType.ArrowClosed }, ...(kind ? { kind } : {}), ...(gateOrder ? { order: gateOrder, maxRevisions: 1, onExhausted: 'ask_user', onBlocked: 'ask_user' } : {}) }, eds);
     });
