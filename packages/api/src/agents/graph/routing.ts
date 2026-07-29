@@ -11,6 +11,7 @@
  */
 import { z } from 'zod';
 import type { GraphV5, RouteLane, Risk } from './graph.js';
+import { isEdgeActive } from './graph.js';
 
 export type IntentMode = 'auto' | 'answer' | 'inspect' | 'change';
 
@@ -132,7 +133,7 @@ export function resolveCapabilityProfile(lane: RouteLane, risk: Risk): Capabilit
 
 /**
  * 解析 lane → entry/end/gates：在 V5 图里找匹配该 lane 的 route 边得 entry，沿 forward 链走到 End，
- * 收集路径上 work 节点的 gate（按 order）。forward 无 lanes 永远活跃；带 lanes 仅匹配 lane 活跃。
+ * 收集路径上 work 节点的 gate（按 order）。forward/gate 活跃判定统一走 isEdgeActive（lanes + minRisk）。
  */
 export function resolveLanePlan(graph: GraphV5, rd: RouteDecision, rerouted: boolean): RunPlan {
   const router = graph.nodes.find((n) => n.type === 'router');
@@ -141,7 +142,7 @@ export function resolveLanePlan(graph: GraphV5, rd: RouteDecision, rerouted: boo
   if (!routeEdge) throw new Error(`no route edge for lane '${rd.lane}'`);
   const forward = graph.edges.filter((e): e is Extract<GraphV5Edge, { kind: 'forward' }> => e.kind === 'forward');
   const activeForward = (from: string): Extract<GraphV5Edge, { kind: 'forward' }> | undefined =>
-    forward.find((e) => e.source === from && (!e.lanes || e.lanes.includes(rd.lane)));
+    forward.find((e) => e.source === from && isEdgeActive(e, rd.lane, rd.risk));
   const gateNodeIds: string[] = [];
   let cur: string | undefined = routeEdge.target;
   let endNodeId: string | undefined;
@@ -154,7 +155,7 @@ export function resolveLanePlan(graph: GraphV5, rd: RouteDecision, rerouted: boo
     if (node.type === 'end') { endNodeId = node.id; break; }
     if (node.type === 'agent') {
       const gates = graph.edges
-        .filter((e): e is Extract<GraphV5Edge, { kind: 'gate' }> => e.kind === 'gate' && e.source === node.id)
+        .filter((e): e is Extract<GraphV5Edge, { kind: 'gate' }> => e.kind === 'gate' && e.source === node.id && isEdgeActive(e, rd.lane, rd.risk))
         .sort((a, b) => a.order - b.order);
       for (const g of gates) gateNodeIds.push(g.id);
     }

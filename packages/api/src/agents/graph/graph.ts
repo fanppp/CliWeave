@@ -92,6 +92,22 @@ export type RouteLane = z.infer<typeof RouteLaneSchema>;
 export const RiskSchema = z.enum(['low', 'medium', 'high', 'critical']);
 export type Risk = z.infer<typeof RiskSchema>;
 
+const RISK_RANK: Record<Risk, number> = { low: 0, medium: 1, high: 2, critical: 3 };
+export function riskRank(risk: Risk): number { return RISK_RANK[risk]; }
+
+/**
+ * V5 边活跃判定（forward/gate 共用；resolveLanePlan / validateV5Runnable / walkLane 共享）。
+ * - 无 lanes（或空）→ 对所有 lane 活跃。
+ * - 有 lanes → 须包含当前 lane。
+ * - 有 minRisk 且传入 risk → 当前 risk 须达到阈值（planned_change+medium<high 跳过 Security；high/critical 必经）。
+ * - 有 minRisk 但未传 risk（结构校验）→ 忽略 minRisk，只按 lane 判定（gate 不影响 forward 链可达性）。
+ */
+export function isEdgeActive(edge: { lanes?: RouteLane[]; minRisk?: Risk }, lane: RouteLane, risk?: Risk): boolean {
+  if (edge.lanes && edge.lanes.length > 0 && !edge.lanes.includes(lane)) return false;
+  if (edge.minRisk && risk && riskRank(risk) < riskRank(edge.minRisk)) return false;
+  return true;
+}
+
 const V5InputNodeSchema = V3InputNodeSchema;
 const V5RouterNodeSchema = z.object({
   id: GraphNodeIdSchema, type: z.literal('router'), agentNodeKey: AgentNodeKeySchema,
@@ -521,7 +537,7 @@ function validateV5Runnable(graph: GraphV5): void {
         seen.add(cur);
         const node = graph.nodes.find((n) => n.id === cur);
         if (node?.type === 'end') { reachedEnd = true; break; }
-        const next = forward.find((e) => e.source === cur && (!e.lanes || e.lanes.includes(lane)));
+        const next = forward.find((e) => e.source === cur && isEdgeActive(e, lane));
         cur = next?.target;
       }
       if (!reachedEnd) throw new GraphValidationError(`lane '${lane}' does not deterministically reach End`);
@@ -574,15 +590,23 @@ export function readProjectGraph(projectId: string): AnyGraph {
   return readGraphFile(projectGraphFile(projectId), getDefaultProjectGraph());
 }
 
-/** 原子写入画布图（强制 projectId）。拒绝 V5→V4/V3 降级（须用显式迁移向导）。 */
+/**
+ * PUT 编辑不得降级 schema：V5→V4/V3、V4→V3 均拒（"只能经显式迁移/回滚服务改变 schema"）。
+ * 升级（V3→V4/V5、V4→V5）当前仍允许经 PUT；#13 迁移服务落地后改为仅同版本编辑，升级走迁移服务。
+ */
+export function assertNoSchemaDowngrade(existingVersion: number, newVersion: number): void {
+  if (newVersion < existingVersion) {
+    throw new GraphValidationError(`refusing to downgrade graph from V${existingVersion} to V${newVersion} (use the explicit migration wizard)`);
+  }
+}
+
+/** 原子写入画布图（强制 projectId）。拒绝降级（V5→V4/V3、V4→V3；须用显式迁移向导）。 */
 export function writeProjectGraph(projectId: string, graph: AnyGraph): void {
   const parsed = GraphSchema.parse(graph);
   validateGraph(parsed);
   const file = projectGraphFile(projectId);
   const existing = existsSync(file) ? parseGraphRaw(JSON.parse(readFileSync(file, 'utf-8').replace(/^\uFEFF/, '') ?? '{}')) : null;
-  if (existing && existing.schemaVersion === 5 && parsed.schemaVersion < 5) {
-    throw new GraphValidationError(`refusing to downgrade graph from V5 to V${parsed.schemaVersion} (use the explicit migration wizard)`);
-  }
+  if (existing) assertNoSchemaDowngrade(existing.schemaVersion, parsed.schemaVersion);
   const tmp = `${file}.tmp`;
   writeFileSync(tmp, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
   renameSync(tmp, file);

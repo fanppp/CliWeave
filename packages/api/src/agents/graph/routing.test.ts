@@ -104,3 +104,56 @@ describe('resolveLanePlan', () => {
     assert.throws(() => resolveLanePlan(v5Graph(), rd('investigate'), false), /no route edge for lane/);
   });
 });
+
+// planned_change 图：architect → implementer，含 code gate + Security gate(minRisk=high)。
+function plannedGraph(): GraphV5 {
+  return {
+    schemaVersion: 5, inputNode: '__input__', endNode: '__end__', maxNodeExecutions: 80,
+    nodes: [
+      { id: '__input__', type: 'input' },
+      { id: 'router', type: 'router', agentNodeKey: 'opencode:project-router', policyRef: 'router-policy.json' },
+      { id: 'architect', type: 'agent', agentNodeKey: 'opencode:architect' },
+      { id: 'implementer', type: 'agent', agentNodeKey: 'opencode:implementer' },
+      { id: 'code-review', type: 'decision', agentNodeKey: 'codex:code-review', rubricRef: 'rubric.json' },
+      { id: 'security-review', type: 'decision', agentNodeKey: 'codex:security-review', rubricRef: 'rubric.json' },
+      { id: '__end__', type: 'end' },
+    ],
+    edges: [
+      { id: 'in->router', source: '__input__', target: 'router', kind: 'forward' },
+      { id: 'route-architect', source: 'router', target: 'architect', kind: 'route', lanes: ['planned_change'] },
+      { id: 'route-implementer', source: 'router', target: 'implementer', kind: 'route', lanes: ['small_change'] },
+      { id: 'architect->implementer', source: 'architect', target: 'implementer', kind: 'forward', lanes: ['planned_change'] },
+      { id: 'implementer->end', source: 'implementer', target: '__end__', kind: 'forward', lanes: ['small_change', 'planned_change'] },
+      { id: 'gate-code', source: 'implementer', target: 'code-review', kind: 'gate', order: 1, maxRevisions: 1, onExhausted: 'ask_user', onBlocked: 'ask_user', lanes: ['small_change', 'planned_change'] },
+      { id: 'rework-code', source: 'code-review', target: 'implementer', kind: 'rework' },
+      { id: 'gate-security', source: 'implementer', target: 'security-review', kind: 'gate', order: 2, maxRevisions: 1, onExhausted: 'ask_user', onBlocked: 'fail', lanes: ['planned_change'], minRisk: 'high' },
+      { id: 'rework-security', source: 'security-review', target: 'implementer', kind: 'rework' },
+    ],
+  };
+}
+
+describe('resolveLanePlan risk gating (isEdgeActive minRisk)', () => {
+  it('planned_change + medium skips Security gate (risk below minRisk high)', () => {
+    const plan = resolveLanePlan(plannedGraph(), rd('planned_change', { risk: 'medium' }), false);
+    assert.equal(plan.entryNodeId, 'architect');
+    assert.deepEqual(plan.gateNodeIds, ['gate-code']);
+  });
+
+  it('planned_change + high/critical must pass Security gate', () => {
+    assert.deepEqual(resolveLanePlan(plannedGraph(), rd('planned_change', { risk: 'high' }), false).gateNodeIds, ['gate-code', 'gate-security']);
+    assert.deepEqual(resolveLanePlan(plannedGraph(), rd('planned_change', { risk: 'critical' }), false).gateNodeIds, ['gate-code', 'gate-security']);
+  });
+
+  it('small_change never activates the planned_change-only Security gate (regardless of risk)', () => {
+    assert.deepEqual(resolveLanePlan(plannedGraph(), rd('small_change', { risk: 'critical' }), false).gateNodeIds, ['gate-code']);
+    assert.equal(resolveLanePlan(plannedGraph(), rd('small_change', { risk: 'critical' }), false).entryNodeId, 'implementer');
+  });
+
+  it('run_plan_created gateNodeIds match runtime walkLane gates (planned_change+medium vs +high)', () => {
+    // resolveLanePlan 产出的 gateNodeIds 即 run_plan_created 事件与 walkLane 运行时共用 isEdgeActive 的结果，二者一致。
+    const medium = resolveLanePlan(plannedGraph(), rd('planned_change', { risk: 'medium' }), false).gateNodeIds;
+    const high = resolveLanePlan(plannedGraph(), rd('planned_change', { risk: 'high' }), false).gateNodeIds;
+    assert.deepEqual(medium, ['gate-code']);
+    assert.deepEqual(high, ['gate-code', 'gate-security']);
+  });
+});

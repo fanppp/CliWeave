@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateGraph, validateRunnable, GraphValidationError, type GraphV5 } from './graph.js';
+import { validateGraph, validateRunnable, GraphValidationError, isEdgeActive, assertNoSchemaDowngrade, type GraphV5 } from './graph.js';
 
 function v5(over: Partial<Pick<GraphV5, 'nodes' | 'edges'>> = {}): GraphV5 {
   const base: GraphV5 = {
@@ -80,5 +80,38 @@ describe('V5 graph validation', () => {
   it('accepts clarify/unsupported lanes without requiring End reachability', () => {
     const g = v5({ edges: [...v5().edges.filter((e) => !e.id.startsWith('route-')), { id: 'route-clarify', source: 'router', target: 'responder', kind: 'route', lanes: ['clarify'] }] });
     validateRunnable(g);
+  });
+});
+
+describe('isEdgeActive (lanes + minRisk)', () => {
+  it('no lanes → active for any lane', () => {
+    assert.equal(isEdgeActive({}, 'direct_answer'), true);
+    assert.equal(isEdgeActive({}, 'planned_change'), true);
+  });
+  it('lanes → active only when lane included', () => {
+    assert.equal(isEdgeActive({ lanes: ['small_change'] }, 'small_change'), true);
+    assert.equal(isEdgeActive({ lanes: ['planned_change'] }, 'small_change'), false);
+  });
+  it('minRisk → active only when risk meets threshold', () => {
+    assert.equal(isEdgeActive({ lanes: ['planned_change'], minRisk: 'high' }, 'planned_change', 'medium'), false);
+    assert.equal(isEdgeActive({ lanes: ['planned_change'], minRisk: 'high' }, 'planned_change', 'high'), true);
+    assert.equal(isEdgeActive({ lanes: ['planned_change'], minRisk: 'high' }, 'planned_change', 'critical'), true);
+  });
+  it('minRisk ignored when risk omitted (structural/runnable check)', () => {
+    assert.equal(isEdgeActive({ lanes: ['planned_change'], minRisk: 'high' }, 'planned_change'), true);
+  });
+});
+
+describe('assertNoSchemaDowngrade (PUT 降级保护)', () => {
+  it('rejects V5→V4, V5→V3, V4→V3', () => {
+    assert.throws(() => assertNoSchemaDowngrade(5, 4), /downgrade/);
+    assert.throws(() => assertNoSchemaDowngrade(5, 3), /downgrade/);
+    assert.throws(() => assertNoSchemaDowngrade(4, 3), /downgrade/);
+  });
+  it('allows same-version edits and upgrades via PUT (upgrades blocked later by migration service)', () => {
+    assert.doesNotThrow(() => assertNoSchemaDowngrade(5, 5));
+    assert.doesNotThrow(() => assertNoSchemaDowngrade(4, 4));
+    assert.doesNotThrow(() => assertNoSchemaDowngrade(3, 4));
+    assert.doesNotThrow(() => assertNoSchemaDowngrade(4, 5));
   });
 });

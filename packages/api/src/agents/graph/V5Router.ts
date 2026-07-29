@@ -12,6 +12,7 @@ import { formatInstanceKey } from '../instance-key.js';
 import type { SessionPolicy, NodeOutcome } from '../session-policy.js';
 import type { AgentMessage } from '../types.js';
 import type { GraphV5, GraphV5Edge } from './graph.js';
+import { isEdgeActive } from './graph.js';
 import type { ExecNode, ExecuteOptions } from './AgentRouter.js';
 import type { PublicGraphEvent, RunQuality } from '../../infrastructure/websocket/SocketManager.js';
 import { routerPrompt, parseRouteDecision, validateRouteDecision, resolveLanePlan, type IntentMode, type RouteDecision, type RunPlan } from './routing.js';
@@ -121,7 +122,7 @@ async function walkLane(
   const emitBoth = (e: PublicGraphEvent): void => { emit(e); record?.(e); };
   const activeForward = (from: string): GraphV5Edge | undefined => {
     const fwd = graph.edges.filter((e): e is Extract<GraphV5Edge, { kind: 'forward' }> => e.kind === 'forward');
-    return fwd.find((e) => e.source === from && (!e.lanes || e.lanes.includes(plan.lane)));
+    return fwd.find((e) => e.source === from && isEdgeActive(e, plan.lane, plan.routeDecision.risk));
   };
   let unresolvedGateIds: string[] = [];
   let exhausted = false;
@@ -149,7 +150,7 @@ async function walkLane(
     firstWork = false;
     let candidate = makeCandidate(); candidates.push(candidate);
     emitBoth({ type: 'candidate_produced', runId, branchId: 'main', candidate, timestamp: Date.now() });
-    const gates = graph.edges.filter((e): e is Extract<GraphV5Edge, { kind: 'gate' }> => e.kind === 'gate' && e.source === node.id && (!e.lanes || e.lanes.includes(plan.lane))).sort((a, b) => a.order - b.order);
+    const gates = graph.edges.filter((e): e is Extract<GraphV5Edge, { kind: 'gate' }> => e.kind === 'gate' && e.source === node.id && isEdgeActive(e, plan.lane, plan.routeDecision.risk)).sort((a, b) => a.order - b.order);
     const gateCounts: Record<string, number> = {};
     let gateIndex = 0;
     let degraded = false;
