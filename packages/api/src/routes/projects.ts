@@ -44,7 +44,7 @@ import {
 } from '../agents/run-registry.js';
 import { resolveInstanceDescriptorPaths } from '../agents/node-instance.js';
 import { executeGraph, runAgentNode } from '../agents/graph/AgentRouter.js';
-import { resumeEvaluatorOptimizerGraph, verifyCheckpointToken, type HarnessCheckpoint } from '../agents/graph/EvaluatorOptimizerRouter.js';
+import { resumeEvaluatorOptimizerGraph, verifyCheckpointToken, isAllowedResumeAction, type HarnessCheckpoint, type ResumeAction } from '../agents/graph/EvaluatorOptimizerRouter.js';
 import { invokeAgentWithPolicy } from '../agents/invoke-agent.js';
 import { buildThreadContext, buildServerContext } from '../agents/context-builder.js';
 import { snapshotRubrics } from '../agents/graph/evaluation.js';
@@ -877,6 +877,10 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
       const checkpointEvent = [...persisted.events].reverse().find((event) => event.type === 'branch_checkpoint' && event.branchId === body.branchId);
       if (!checkpointEvent || checkpointEvent.type !== 'branch_checkpoint') return reply.code(404).send({ error: 'branch checkpoint not found' });
       const checkpoint = checkpointEvent.payload as HarnessCheckpoint;
+      // V4.2: 校验 action ∈ checkpoint.allowedActions（无 best 时禁止 continue_best），在消费 token 之前。
+      if (!isAllowedResumeAction(checkpoint, String(body.action))) {
+        return reply.code(409).send({ error: `action '${String(body.action)}' is not allowed for this checkpoint; allowed: ${(checkpoint.allowedActions ?? (['continue_best', 'revise_once', 'fail'] as ResumeAction[])).join(', ')}` });
+      }
       const consumed = persisted.events.some((event) => event.type === 'run_state' && event.phase === 'resume_token_consumed' && (event.payload as { tokenHash?: unknown })?.tokenHash === checkpoint.tokenHash);
       if (consumed || !verifyCheckpointToken(checkpoint, body.resumeToken)) return reply.code(409).send({ error: 'resume token is invalid, expired, or already used' });
       const entry = getRun(runId);

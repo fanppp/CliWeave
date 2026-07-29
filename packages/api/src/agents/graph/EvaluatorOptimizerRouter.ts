@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { formatInstanceKey } from '../instance-key.js';
 import type { SessionPolicy } from '../session-policy.js';
 import type { AgentMessage } from '../types.js';
-import { AUTO_ROUTE_INSTRUCTION, extractCompletion } from './completion.js';
+import { AUTO_ROUTE_INSTRUCTION, completionRetryPrompt, extractCompletion } from './completion.js';
 import { evaluatorPrompt, extractEvaluation, readDecisionRubric, revisionPrompt, selectBest, type Candidate, type Evaluation } from './evaluation.js';
 import type { ExhaustedPolicy, GraphV4 } from './graph.js';
 import type { ExecNode, ExecuteOptions } from './AgentRouter.js';
@@ -22,19 +22,29 @@ export interface HarnessCheckpoint {
   nextForwardNodeId?: string;
   tokenHash: string;
   expiresAt: number;
+  /** V4.2: 该 checkpoint 允许的恢复动作（无 best 时不允许 continue_best）。Resume API 须校验 action ∈ allowedActions。 */
+  allowedActions: ResumeAction[];
+  bestCandidateId?: string;
+  pauseReason: 'exhausted' | 'blocked' | 'malformed';
 }
 
 type BranchResult = { status: 'completed' | 'early_complete' | 'best_effort'; output: string } | { status: 'paused' } | { status: 'error'; error: string } | { status: 'aborted' };
 
 const tokenHash = (token: string): string => createHash('sha256').update(token).digest('hex');
 
-type ResumeAction = 'continue_best' | 'revise_once' | 'fail';
+export type ResumeAction = 'continue_best' | 'revise_once' | 'fail';
 
 export function verifyCheckpointToken(checkpoint: HarnessCheckpoint, token: string): boolean {
   if (checkpoint.expiresAt < Date.now()) return false;
   const actual = Buffer.from(tokenHash(token), 'hex');
   const expected = Buffer.from(checkpoint.tokenHash, 'hex');
   return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+/** V4.2: 校验 resume action ∈ checkpoint.allowedActions（无 best 时禁止 continue_best）。旧 checkpoint 无 allowedActions 时回退允许全部三种。 */
+export function isAllowedResumeAction(checkpoint: HarnessCheckpoint, action: string): boolean {
+  const allowed = checkpoint.allowedActions ?? (['continue_best', 'revise_once', 'fail'] as ResumeAction[]);
+  return allowed.includes(action as ResumeAction);
 }
 
 export async function walkEvaluatorOptimizerGraph(prompt: string, graph: GraphV4, opts: ExecuteOptions, exec: ExecNode, resume?: { checkpoint: HarnessCheckpoint; action: ResumeAction }): Promise<void> {
@@ -69,8 +79,8 @@ export async function walkEvaluatorOptimizerGraph(prompt: string, graph: GraphV4
     const expiresAt = Date.now() + 24 * 60 * 60 * 1000;
     const payload: HarnessCheckpoint = { schemaVersion: 1, ...checkpoint, tokenHash: tokenHash(token), expiresAt };
     record?.({ type: 'branch_checkpoint', runId, branchId, payload });
-    record?.({ type: 'run_state', runId, phase: 'paused', payload: { branchId, gateId, status: 'paused' } });
-    emit({ type: 'run_paused', runId, projectId, branchId, gateId, question: '审核预算耗尽或评估阻塞，请选择后续动作', options: ['continue_best', 'revise_once', 'fail'], resumeToken: token, expiresAt });
+    record?.({ type: 'run_state', runId, phase: 'paused', payload: { branchId, gateId, status: 'paused', pauseReason: payload.pauseReason, allowedActions: payload.allowedActions, ...(payload.bestCandidateId ? { bestCandidateId: payload.bestCandidateId } : {}) } });
+    emit({ type: 'run_paused', runId, projectId, branchId, gateId, question: '审核预算耗尽或评估阻塞，请选择后续动作', options: payload.allowedActions, resumeToken: token, expiresAt });
     return { status: 'paused' };
   }
 
@@ -106,13 +116,29 @@ export async function walkEvaluatorOptimizerGraph(prompt: string, graph: GraphV4
         workerSessionId = outcome.sessionId;
         artifact = outcome.finalText ?? '';
         if (firstWork && (opts.runMode ?? 'full') === 'auto') {
-          const routed = extractCompletion(artifact); artifact = routed.artifact;
+          let routed = extractCompletion(artifact);
           emitBoth({ type: 'route_decided', runId, branchId, nodeId: node.id, claim: routed.claim, decision: routed.decision, reason: routed.reason, timestamp: Date.now() });
+          // V4.1: 模型声明 FINISH/CLARIFY 但 artifact 为空 → 定向重试一次，要求补完整答案 + 控制块。
+          if (routed.claim && (routed.claim.action === 'finish' || routed.claim.action === 'clarify') && routed.diagnostic === 'empty_artifact') {
+            const retried = await invoke(node, completionRetryPrompt(prompt), revision + 2, { mode: 'fresh', persistActive: false });
+            if (retried.status !== 'ok') return retried.status === 'aborted' ? { status: 'aborted' } : { status: 'error', error: retried.error ?? `${node.id} completion retry failed` };
+            workerSessionId = retried.sessionId ?? workerSessionId;
+            artifact = retried.finalText ?? '';
+            routed = extractCompletion(artifact);
+            emitBoth({ type: 'route_decided', runId, branchId, nodeId: node.id, claim: routed.claim, decision: routed.decision, reason: routed.reason, timestamp: Date.now() });
+            if (routed.claim && (routed.claim.action === 'finish' || routed.claim.action === 'clarify') && routed.diagnostic === 'empty_artifact') {
+              return { status: 'error', error: `work '${node.id}' produced empty artifact after completion retry` };
+            }
+          }
+          artifact = routed.artifact;
           if (routed.decision === 'finish' || routed.decision === 'clarify') {
+            if (!artifact) return { status: 'error', error: `work '${node.id}' empty ${routed.decision} artifact` };
             emitBoth({ type: 'branch_done', runId, branchId, cause: routed.decision === 'finish' ? 'early_complete' : 'needs_input', finalArtifact: artifact, timestamp: Date.now() });
             return { status: 'early_complete', output: artifact };
           }
         }
+        // V4.1: 任意 work 空输出都不得进入 Decision。
+        if (!artifact) return { status: 'error', error: `work '${node.id}' produced empty output; cannot enter evaluation` };
         firstWork = false;
         candidate = makeCandidate(); candidates.push(candidate);
         emitBoth({ type: 'candidate_produced', runId, branchId, candidate, timestamp: Date.now() });
@@ -143,13 +169,17 @@ export async function walkEvaluatorOptimizerGraph(prompt: string, graph: GraphV4
         const rubric = opts.rubrics?.[decision.id]?.rubric ?? readDecisionRubric(projectId, decision);
         emitBoth({ type: 'gate_status', runId, branchId, gateId: gate.id, status: 'running', timestamp: Date.now() });
         let evaluation: Evaluation | null = null;
+        let evaluatorMalformed = false;
         for (let attempt = 0; attempt < 2 && !evaluation; attempt++) {
           const evaluated = await invoke(decision, evaluatorPrompt(prompt, candidate.artifact, candidate.id, rubric), attempt + 1, { mode: 'fresh', persistActive: false });
           if (evaluated.status === 'aborted') return { status: 'aborted' };
           if (evaluated.status !== 'ok') continue;
           try { evaluation = extractEvaluation(evaluated.finalText ?? '', candidate.id, rubric); } catch { /* malformed: one fresh retry */ }
         }
-        evaluation ??= { candidateId: candidate.id, verdict: 'blocked', reason: 'evaluator returned malformed output twice', missingRequirements: [] };
+        if (!evaluation) {
+          evaluatorMalformed = true;
+          evaluation = { candidateId: candidate.id, verdict: 'blocked', reason: 'evaluator returned malformed output twice', missingRequirements: [] };
+        }
         candidate.evaluations[gate.id] = evaluation;
         emitBoth({ type: 'evaluation_done', runId, branchId, gateId: gate.id, decisionNodeId: decision.id, evaluation, timestamp: Date.now() });
         if (evaluation.verdict === 'approve') {
@@ -161,7 +191,9 @@ export async function walkEvaluatorOptimizerGraph(prompt: string, graph: GraphV4
         if (evaluation.verdict === 'blocked') {
           emitBoth({ type: 'gate_status', runId, branchId, gateId: gate.id, status: 'blocked', timestamp: Date.now() });
           if (gate.onBlocked === 'fail') return { status: 'error', error: `gate '${gate.id}' blocked: ${evaluation.reason}` };
-          return pause(branchId, gate.id, { prompt, branchId, workNodeId: node.id, upstreamArtifact, candidates, currentCandidateId: candidate.id, ...(workerSessionId ? { workerSessionId } : {}), gateIndex, gateCounts, degraded, nextForwardNodeId: forwardFrom(node.id)?.target });
+          const bestBlocked = selectBest(candidates, gate.id, rubric);
+          const allowedBlocked: ResumeAction[] = bestBlocked ? ['continue_best', 'revise_once', 'fail'] : ['revise_once', 'fail'];
+          return pause(branchId, gate.id, { prompt, branchId, workNodeId: node.id, upstreamArtifact, candidates, currentCandidateId: bestBlocked?.id ?? candidate.id, ...(workerSessionId ? { workerSessionId } : {}), gateIndex, gateCounts, degraded, nextForwardNodeId: forwardFrom(node.id)?.target, pauseReason: evaluatorMalformed ? 'malformed' : 'blocked', allowedActions: allowedBlocked, ...(bestBlocked ? { bestCandidateId: bestBlocked.id } : {}) });
         }
         const used = gateCounts[gate.id] ?? 0;
         if (used < gate.maxRevisions) {
@@ -179,8 +211,13 @@ export async function walkEvaluatorOptimizerGraph(prompt: string, graph: GraphV4
         emitBoth({ type: 'gate_status', runId, branchId, gateId: gate.id, status: 'exhausted', timestamp: Date.now() });
         const best = selectBest(candidates, gate.id, rubric);
         if (best) emitBoth({ type: 'best_candidate_selected', runId, branchId, gateId: gate.id, candidateId: best.id, timestamp: Date.now() });
-        if (policy === 'fail' || !best) return { status: 'error', error: `gate '${gate.id}' exhausted without an acceptable candidate` };
-        if (policy === 'ask_user') return pause(branchId, gate.id, { prompt, branchId, workNodeId: node.id, upstreamArtifact, candidates, currentCandidateId: best.id, ...(workerSessionId ? { workerSessionId } : {}), gateIndex, gateCounts, degraded, nextForwardNodeId: forwardFrom(node.id)?.target });
+        if (policy === 'fail') return { status: 'error', error: `gate '${gate.id}' exhausted (fail policy)` };
+        // V4.2: 无 best → 只允许 revise_once|fail（禁 continue_best）；有 best → 允许 continue_best。
+        const allowedExhausted: ResumeAction[] = best ? ['continue_best', 'revise_once', 'fail'] : ['revise_once', 'fail'];
+        if (policy === 'ask_user' || !best) {
+          return pause(branchId, gate.id, { prompt, branchId, workNodeId: node.id, upstreamArtifact, candidates, currentCandidateId: best?.id ?? candidate.id, ...(workerSessionId ? { workerSessionId } : {}), gateIndex, gateCounts, degraded, nextForwardNodeId: forwardFrom(node.id)?.target, pauseReason: 'exhausted', allowedActions: allowedExhausted, ...(best ? { bestCandidateId: best.id } : {}) });
+        }
+        // policy === 'continue_best' 且有 best → 自动 best-effort 放行（不暂停）。
         candidate = best; artifact = best.artifact; degraded = true; gateIndex++;
       }
       upstreamArtifact = candidate.artifact;

@@ -144,25 +144,31 @@
 2. **Q2**：多轮记忆如何处理、每个 CLI 是否要带上一轮结果。
 3. **Q3**：可否直接从某节点开始。
 
-### 八步计划与状态
+### 进度总览（已纠正：V4 早已存在，非"未开始"）
 
-| Step | 内容 | 状态 | commit |
+| 阶段 | 内容 | 状态 | commit |
 |------|------|------|--------|
-| **1** | Session 基座（切断 graph↔active-session + `session_fallback` 协议 + node-mode WS/路由全迁 project-aware） | ✅ 完成 | `3650b52` |
-| **2** | Thread 基座（append-only events + revision lock + pending run 持久化 + CRUD） | ✅ 完成 | `4f9ec5e` |
-| **3** | ContextBuilder（Thread 跨轮记忆注入 + serverContext + 12k 预算裁剪 + untrusted 包裹） | ✅ 完成 | `6ae6016` |
-| **4a** | V4 Harness 核心（V4 schema/edge kind、rubric、evaluation、`walkEvaluatorOptimizerGraph`、事件源 run 历史；V3/V4 **双 runner**，存量 V3 不自动转 V4） | ❌ 未开始 | — |
-| **4b** | 智能终止（CompletionClaim + Evaluation `disposition` + branch 早结束 + `route_decided`/`branch_done`）= **Q1** | ❌ 未开始 | — |
-| **5** | RunEntry（`{kind:'work',mode:'downstream'\|'node_only'}` + validateRunEntry + 历史 artifact 校验）= **Q3** | ❌ 未开始 | — |
-| **6** | Durable pause（ask_user checkpoint/resume） | ❌ 未开始 | — |
-| **7** | 前端（Thread 选择器 + 新对话/继续对话 + 节点入口菜单 + route decision 展示） | ❌ 未开始 | — |
-| **8** | 增强（可配置摘要生成器、语义检索、可审长期 memory） | ❌ 未开始 | — |
+| **Step 1** | Session 基座（切断 graph↔active-session + `session_fallback` 协议 + node-mode WS/路由全迁 project-aware） | ✅ 完成 | `3650b52` |
+| **Step 2** | Thread 基座（append-only events + revision lock + pending run 持久化 + CRUD） | ✅ 完成 | `4f9ec5e` |
+| **Step 3** | ContextBuilder（Thread 跨轮记忆注入 + serverContext + 12k 预算裁剪 + untrusted 包裹） | ✅ 完成 | `6ae6016` |
+| **V4 Harness** | V4 schema（decision/gate/rework + maxRevisions/onExhausted/onBlocked）+ `walkEvaluatorOptimizerGraph`/`resumeEvaluatorOptimizerGraph` + `evaluation.ts`（selectBest/extractEvaluation/snapshotRubrics/evaluatorPrompt/revisionPrompt）+ `completion.ts`（extractCompletion/AUTO_ROUTE_INSTRUCTION ROUTE 控制块）+ `HarnessCheckpoint`/`verifyCheckpointToken`/pause-resume + `projects.ts` resume 路由 + `gatePolicyOverrides` + rubric 路径 jail + run_meta.rubrics 快照 + resumeToken 净化 | ✅ **早已存在**（V3/V4 双 runner，不读时迁移） | — |
+| **V4.1** | 修复 Auto 提前结束：extractCompletion 四分类（empty_artifact/unsafe_category/malformed_control/missing_control）+ FINISH 空 artifact 定向重试 Architect 一次 + 仍空→run_error + 任意 work 空输出永不进 Decision | ✅ 完成（本提交） | — |
+| **V4.2** | 修复 blocked/bestCandidate：HarnessCheckpoint.allowedActions/bestCandidateId/pauseReason + blocked 不参选（rank null）+ 无 best 只 revise_once|fail 禁 continue_best + 有历史 best 才 allow continue_best + Resume API 校验 action∈allowedActions（`isAllowedResumeAction`）+ revise_once 从该 work 第一 gate 重审 + 前端按钮来自服务端 options | ✅ 完成（本提交） | — |
+| **V4.3** | 完成质量 Payload：WorkPayload{payload, quality{status,exhausted,bestCandidateId,evaluations,unresolvedGateIds}} + 下游只用 payload + quality 独立元数据 + evaluator 自然语言永不作主 payload + continue_best 保留未解决 gate/evaluation + Thread turn 存 artifact 与质量摘要 | ❌ 未开始（commit #2） | — |
+| **V4.4** | 事件和恢复：补齐 gate_blocked/candidate_rejected/resume_rejected 事件 + 公开 event 与内部 checkpoint 分离 + token hash/到期/allowedActions 写 JSONL + 前端 sessionStorage + 服务重启扫 paused checkpoint 恢复 RunRegistry + token 消费在 Thread/checkpoint/动作全校验后 + V4 仍限单 input 分支 | ❌ 未开始（commit #2） | — |
+| **V4.5** | 测试门槛贯穿：空 FINISH artifact 重试与失败 / 空 candidate 永不进 evaluator / blocked 无 best 拒 continue_best / blocked 有历史 best 允许 / Verify reject→Implementer→Code Reviewer→Verify / 多 gate 独立预算 / resume token 一次性过期非法 action / rubrics 用 run_meta 快照 / 前端刷新恢复 pause / V3 全套不回归 | 🟡 部分完成（V4.1/V4.2 相关项已覆盖；V4.3/V4.4 相关项待 commit #2） | — |
+| **V5 Schema** | RouterNode/ProjectKnowledgeNode/DocumenterNode + RouteEdge/ObserveEdge + forward/gate 加 lanes/minRisk + 校验 + RouteDecision + CreateRunRequest(intentMode) + RunCoordinator + 独立 runner 不读时迁移 | ❌ 未开始（commit #3） | — |
+| **V5 角色/模板** | 默认路线 direct_answer/investigate/plan_only/small_change/planned_change/review_only/verify_only + 高风险加 Security Reviewer + 发布部署迁移只产计划暂停 + 新项目默认 V5 模板 + opencode:project-router GLM-5.2 fresh + 缺 Provider 明确报告 | ❌ 未开始（commit #4） | — |
+| **Project Knowledge** | knowledge/ 事实源(.gitignore) + FindingEvent 状态机 + 服务端 fingerprint + API GET/confirm/resolve/accept/reopen/publish + Issues 面板 + Publish 路径 jail/secret scan/冲突/dirty-worktree | ❌ 未开始（commit #5） | — |
+| **Project Scribe** | opencode:project-scribe GLM-5.2 可选 documenter 接 Knowledge observe 边 + 不进主链/不影响 run 成败 + 只输出 ISSUE_SUMMARY_DRAFT + 无 Scribe 时 IssueProjector 确定性模板 | ❌ 未开始（commit #6） | — |
+| **V5 画布/Issues UI** | 四泳道 Direct/Investigation/Engineering/Knowledge + Router 显示 lane/risk/confidence + Knowledge open/resolved 数 + Scribe 状态 + Issues 面板 | ❌ 未开始（commit #7） | — |
+| **能力策略/迁移文档** | 应用层 CapabilityPolicy（projectRead/Write、commandExec、network、externalSideEffects 各角色）+ V3→legacy/V4→保持/V4→V5 预览式显式升级 + OpenCode/Claude 不构成硬隔离 | ❌ 未开始（commit #8） | — |
 
 ### 三问状态
 
-- **Q2 多轮记忆**：✅ **后端完成**（Step 2+3）。Thread 事件源（`turn_opened`/`turn_completed`/`memory_pinned`）+ ContextBuilder 把"最近 8 轮 Q&A + summary + pins + serverContext"前置注入每个节点 prompt，历史 `[untrusted data]` 包裹防注入、超预算裁最旧；永不裁 system/当前消息/上游 payload。每个 work 节点 fresh 跑（不 resume CLI），靠构造 prompt 携带跨轮记忆。
-- **Q1 智能终止**：❌ 未动（Step 4b）。
-- **Q3 从节点开始**：❌ 未动（Step 5）。注：Step 1B 新增的 `POST /api/projects/:pid/nodes` 是创建节点**实例**（node 模式用），不是"从某节点发起 run"。
+- **Q2 多轮记忆**：✅ **后端完成**（Step 2+3）。Thread 事件源 + ContextBuilder 把"最近 8 轮 Q&A + summary + pins + serverContext"前置注入每个节点 prompt，历史 `[untrusted data]` 包裹防注入、超预算裁最旧；永不裁 system/当前消息/上游 payload。每个 work 节点 fresh 跑，靠构造 prompt 携带跨轮记忆。前端未接线（Step 7/commit #7）。
+- **Q1 智能终止**：🟡 **V4 已实现首节点 auto-route 早结束（FINISH simple_answer→early_complete），V4.1 已硬化**（空 artifact 重试、unsafe_category 强制 forward、空输出不进 gate）。完整 CompletionClaim disposition（finish|forward）+ branch 级早结束留 V5 Coordinator。
+- **Q3 从节点开始**：❌ 未动（V5 RunEntry / commit #3-4）。注：Step 1B 的 `POST /api/projects/:pid/nodes` 是创建节点**实例**，不是"从某节点发起 run"。
 
 ### 关键设计决策（已锁定）
 
@@ -170,25 +176,30 @@
 - **WS**：`NodeMessageEnvelope{instanceKey,message}` + `join_node(ack)` + 按 instanceKey 过滤（防 projA/projB 同 nodeKey 串台）；`joinedInstanceKey===activeInstanceKey` 才发。
 - **切换仲裁**：`projectStore` 统一仲裁（`chatBusy || graph starting/running`），忙则整个切换失败；`chatStore.setProjectId` 一旦调用无条件原子重置 + 项目级 active-node localStorage key。
 - **Thread**：`events.jsonl` 事实源（append-only）+ `thread.json` 可变（revision+activeRunId）；revision lock（continue 须传 `expectedThreadRevision`，不匹配→409）；同 Thread 单 active run→409；pending run 落盘（create↔start 之间重启不丢）。
-- **ContextBuilder**：首版纯 raw turns 回退（summary 留空到 Step 8）；char/4 token 估算；serverContext 的 location 由调用方提供（不推断），缺失则省略（首版不 block，ask_user 在 Step 6）。
-- **V3/V4 双 runner**（撤销"读时归一化 V4"）：`schemaVersion===3→walkLegacyGraph`，`===4→walkEvaluatorOptimizerGraph`；V3→V4 提供显式迁移向导（后续），不在读取时自动重写语义。
+- **ContextBuilder**：首版纯 raw turns 回退（summary 留空到 commit #6 Scribe/commit #8 增强）；char/4 token 估算；serverContext 的 location 由调用方提供（不推断），缺失则省略。
+- **V3/V4/V5 三独立 runner，不读时迁移**：`schemaVersion===3→walkLegacyGraph`，`===4→walkEvaluatorOptimizerGraph`，`===5→（V5 Router+Coordinator）`；V3→V4/V4→V5 提供显式预览式迁移向导，不在读取时自动重写语义；PUT 拒绝降级。
+- **V4 稳定化优先**：先修 V4（completion/blocked resume/quality payload/replay），V4 单独提交作 V5 基线；V5 不复用 Architect 文本路由，新增独立 Router/RunCoordinator/ProjectKnowledge。
 
-### 已完成细节（commit 内）
+### 已完成细节
 
-- **Step 1**：`session-policy.ts`（SessionPolicy/NodeOutcome）+ `invoke-agent.ts`（统一 helper，`onMessage:AgentMessage`，graph 与单节点共用）+ `AgentRouter` 薄壳 runAgentNode/NodeExecContext/producerSessions；3 provider session_fallback+`:fb`（opencode 补完整回退）+ spawnFn 测试缝。测试：invoke-agent(7) + walk policy + active-session 文件级双断言(3) + codex session_fallback fake-spawn(2)。
-- **Step 2**：`thread/thread-store.ts`（createThread/readThread/listThreads/trashThread/openTurn/completeTurn/failTurn/abortPendingTurn/pinMemory/unpinMemory/pending run 读写）+ run-registry 加 threadId/turnId + RunMeta 加 threadId/turnId/threadRevision + `projects.ts` POST /run 收 `{message,threadId?,expectedThreadRevision?}` + /start 改读 pending 文件 + 终态回调 completeTurn/failTurn + Thread CRUD 路由。测试：thread-store(11)；运行时烟测：create→turn_opened→pending abort→turn_failed→continue→stale 409→active 409→重启恢复。
-- **Step 3**：`context-builder.ts`（buildThreadContext/buildServerContext）+ ExecuteOptions.contextPrefix + walkBranch 前置注入 + RunMeta.contextSnapshot + `projects.ts`/start 构造 serverContext+buildThreadContext→注入+快照入 run_meta + ProjectLocal.location?。测试：context-builder(8) + walk contextPrefix 前置(1)；运行时烟测：run_meta.contextSnapshot(policyVersion=1, serverContext.timezone=Asia/Shanghai)。
+- **Step 1**：`session-policy.ts` + `invoke-agent.ts` + `AgentRouter` 薄壳；3 provider session_fallback+`:fb`+spawnFn 测试缝。测试：invoke-agent(7)+walk policy+active-session(3)+codex-session-fallback(2)。
+- **Step 2**：`thread-store.ts`（CRUD/openTurn/completeTurn/failTurn/abortPendingTurn/pinMemory/unpinMemory/pending run 读写）+ run-registry/RunMeta 加 threadId/turnId/threadRevision + `projects.ts` POST /run + /start 读 pending + 终态回调 + Thread CRUD。测试：thread-store(11)。
+- **Step 3**：`context-builder.ts`（buildThreadContext/buildServerContext）+ ExecuteOptions.contextPrefix + walkBranch 前置注入 + RunMeta.contextSnapshot + `/start` 构造注入+快照。测试：context-builder(8)+walk 前置(1)。
+- **V4 Harness（早已存在）**：`EvaluatorOptimizerRouter.ts`（walk/resume + HarnessCheckpoint + verifyCheckpointToken + pause + Architect auto-route + 多 gate 有序 + selectBest best-effort + candidate/evaluation 事件源）、`evaluation.ts`（Rubric zod + readDecisionRubric 路径 jail + snapshotRubrics + extractEvaluation malformed 重试1次→blocked + selectBest 排除 blocked + evaluatorPrompt untrusted_candidate 包裹）、`completion.ts`（ROUTE 控制块 + SAFE_FINISH + 保守 forward）、`graph.ts` V4 schema + validateV4Topology/validateV4Runnable（单 input 分支）、`graph-run-store.ts` resumeToken 净化 + rubrics 快照、`projects.ts` resume 路由 + gatePolicyOverrides + snapshotRubrics。测试：evaluator-optimizer-router(5)+evaluation(3)+completion(4)+graph+agent-router。
+- **V4.1（本提交）**：`completion.ts` 加 `CompletionDiagnostic`（ok/empty_artifact/unsafe_category/malformed_control/missing_control）+ `completionRetryPrompt`，**保持 V3 决策语义不变**（finish+空→forward、clarify+空→clarify，V4 靠 claim+diagnostic 触发重试）；`EvaluatorOptimizerRouter` firstWork auto：声明 FINISH/CLARIFY 但空 artifact → 定向重试 Architect 一次（`completionRetryPrompt`），仍空→run_error；任意 work 空输出→run_error 不进 gate。
+- **V4.2（本提交）**：`HarnessCheckpoint` 加 `allowedActions`/`bestCandidateId?`/`pauseReason`；blocked/exhausted 分支计算 best（selectBest 已排除 blocked via rank null）→ 无 best 只 `[revise_once,fail]`，有 best 才加 `continue_best`；`pause()` emit options 来自 allowedActions + run_state 带 pauseReason/bestCandidateId；`isAllowedResumeAction` 导出供路由+测试；`projects.ts` resume 路由在消费 token 前校验 action∈allowedActions（409）；evaluatorMalformed→pauseReason 'malformed'；前端 `GraphRunPanel` 按钮从 `paused.options` 渲染。测试：completion(8)+evaluator-optimizer-router(15)+isAllowedResumeAction。
 
-**累计测试 72 过**（cli-storage + registries + active-session + invoke-agent + context-builder + thread-store + graph + agent-router + codex-session-fallback）；api+web typecheck 绿。
+**累计测试 107 过**（含 V4.1/V4.2 新增 12 例：completion +6、V4 router +10、isAllowedResumeAction +1）；api+web typecheck 绿；web build 绿；启动烟测 /api/providers+/api/projects 200（tsx watch 热重载未崩）。
 
 ### 重要提醒
 
-- Step 2/3 的**后端契约已完成并测试**，但**前端尚未接线**（`graphRunStore.startRun` 仍发 `{prompt}`、无 Thread 选择器/继续对话 UI、RunPicker 不按 thread 分组）。即从 web UI 还用不上多轮记忆——那是 **Step 7**。后端已可独立验证（curl + 测试）。
-- ContextBuilder 前缀当前注入**所有** agent 节点（含 decision/reviewer）；设计原指"每个 work 节点"，Step 4b 可细化。
+- Step 2/3 的**后端契约已完成并测试**，但**前端尚未接线**（`graphRunStore.startRun` 仍发 `{prompt}`、无 Thread 选择器/继续对话 UI、RunPicker 不按 thread 分组）。即从 web UI 还用不上多轮记忆——那是 commit #7。后端已可独立验证（curl + 测试）。
+- ContextBuilder 前缀当前注入**所有** agent 节点（含 decision/reviewer）；设计原指"每个 work 节点"，V5 Coordinator 可细化。
 - 无前端设置 project `location` 的 UI（`ProjectLocal.location` 字段已就位，首版始终省略）。
+- 真实 V4 运行时烟测需建 V4 图+rubric+CLI 节点（test 项目当前是 V3）；V4.1/V4.2 行为由 15 个单测全覆盖（auto finish/重试/重试失败/unsafe forward/空输出不进 gate/blocked 无 best/blocked 有 best/exhausted/malformed/非法 action）。
 
-### 下一步建议
+### 下一步
 
-- **Step 4a** V4 Harness 核心（为 Q1 智能终止 4b 铺路）。
-- 或先做 **Step 7 前端接线**让 Q2 多轮记忆在 UI 可用。
+- **commit #2**：V4.3 WorkPayload 质量 + V4.4 事件/恢复（gate_blocked/candidate_rejected/resume_rejected + token hash/allowedActions 写 JSONL + 前端 sessionStorage + 服务重启扫 paused checkpoint 恢复 RunRegistry）。
+- 之后 commit #3 V5 schema+Coordinator → #4 V5 角色/模板 → #5 Project Knowledge → #6 Scribe → #7 画布/Issues UI → #8 能力策略/迁移文档。
 

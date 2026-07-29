@@ -42,9 +42,11 @@ export function GraphRunPanel() {
       </div>
       {status === 'paused' && paused && (
         <div style={styles.pauseActions}>
-          <button style={styles.secondaryBtn} onClick={() => void resumeRun('continue_best')}>放行最佳版本</button>
-          <button style={styles.secondaryBtn} onClick={() => void resumeRun('revise_once')}>再修订一次</button>
-          <button style={{ ...styles.btn, ...styles.stopBtn }} onClick={() => void resumeRun('fail')}>失败结束</button>
+          {paused.options.map((action) => (
+            <button key={action} style={action === 'fail' ? { ...styles.btn, ...styles.stopBtn } : styles.secondaryBtn} onClick={() => void resumeRun(action)}>
+              {RESUME_LABELS[action]}
+            </button>
+          ))}
         </div>
       )}
       {(busy || status === 'paused') && (
@@ -55,6 +57,12 @@ export function GraphRunPanel() {
     </div>
   );
 }
+
+const RESUME_LABELS: Record<'continue_best' | 'revise_once' | 'fail', string> = {
+  continue_best: '放行最佳版本',
+  revise_once: '再修订一次',
+  fail: '失败结束',
+};
 
 const styles: Record<string, CSSProperties> = {
   bar: { padding: '8px 12px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
