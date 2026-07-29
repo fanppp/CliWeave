@@ -8,6 +8,8 @@ import type { Server as HttpServer } from 'node:http';
 import { Server as SocketIOServer, type Socket } from 'socket.io';
 import { isInstanceKey } from '../../agents/instance-key.js';
 import type { AgentMessage } from '../../agents/types.js';
+import type { CompletionClaim } from '../../agents/graph/completion.js';
+import type { Candidate, Evaluation } from '../../agents/graph/evaluation.js';
 
 /**
  * 图运行事件类型（分型，防 Phase 2a 的 run_state/branch_checkpoint 被误广播）。
@@ -32,12 +34,21 @@ export type PublicGraphEvent =
       reviewerFeedback: string | null;
       timestamp: number;
     }
+  | { type: 'route_decided'; runId: string; branchId: string; nodeId: string; claim: CompletionClaim | null; decision: 'finish' | 'forward' | 'clarify'; reason: string; timestamp: number }
+  | { type: 'branch_done'; runId: string; branchId: string; cause: 'early_complete' | 'needs_input' | 'end'; finalArtifact: string; timestamp: number }
+  | { type: 'candidate_produced'; runId: string; branchId: string; gateId?: string; candidate: Candidate; timestamp: number }
+  | { type: 'evaluation_done'; runId: string; branchId: string; gateId: string; decisionNodeId: string; evaluation: Evaluation; timestamp: number }
+  | { type: 'best_candidate_selected'; runId: string; branchId: string; gateId: string; candidateId: string; timestamp: number }
+  | { type: 'gate_status'; runId: string; branchId: string; gateId: string; status: 'running' | 'approved' | 'exhausted' | 'blocked'; timestamp: number }
+  | { type: 'run_paused'; runId: string; projectId: string; branchId: string; gateId: string; question: string; options: ('continue_best' | 'revise_once' | 'fail')[]; resumeToken: string; expiresAt: number }
+  | { type: 'run_resumed'; runId: string; branchId: string; gateId: string }
+  | { type: 'thread_committed'; runId: string; threadId: string; turnId: string; revision: number; status: 'completed' | 'failed' }
   | {
       type: 'run_done';
       runId: string;
       finalText: string;
       /** completed=自然结束；best_effort=回边预算耗尽后 best-effort 放行；edge_limit=旧 V3 历史回放兼容；global_limit=全局执行上限。 */
-      termination: 'completed' | 'best_effort' | 'edge_limit' | 'global_limit';
+      termination: 'completed' | 'early_complete' | 'needs_input' | 'best_effort' | 'edge_limit' | 'global_limit';
       reason?: string;
     }
   | { type: 'run_aborted'; runId: string }

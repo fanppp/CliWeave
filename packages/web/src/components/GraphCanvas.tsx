@@ -17,6 +17,7 @@ import {
   type NodeChange,
   type EdgeChange,
   type NodeProps,
+  type Viewport,
   MarkerType,
 } from '@xyflow/react';
 import { useGraphRunStore, type Graph, type GraphEdge, type GraphNode } from '../stores/graphRunStore';
@@ -40,12 +41,27 @@ interface ProviderMeta {
 
 interface NodeData {
   label: string;
-  kind: 'input' | 'agent' | 'end';
+  kind: 'input' | 'agent' | 'decision' | 'end';
   agentNodeKey?: string;
+  rubricRef?: string;
   [key: string]: unknown;
 }
 
-type FlowEdge = Edge & { maxIterations?: number };
+type FlowEdge = Edge & Pick<GraphEdge, 'maxIterations' | 'kind' | 'order' | 'maxRevisions' | 'onExhausted' | 'onBlocked'>;
+
+const VIEWPORT_KEY = '0agentteams.graphViewport:';
+function readViewport(projectId: string): Viewport | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const value = JSON.parse(window.localStorage.getItem(VIEWPORT_KEY + projectId) ?? 'null') as Partial<Viewport> | null;
+    return value && Number.isFinite(value.x) && Number.isFinite(value.y) && Number.isFinite(value.zoom)
+      ? { x: value.x!, y: value.y!, zoom: value.zoom! }
+      : null;
+  } catch { return null; }
+}
+function writeViewport(projectId: string, viewport: Viewport): void {
+  try { window.localStorage.setItem(VIEWPORT_KEY + projectId, JSON.stringify(viewport)); } catch { /* unavailable */ }
+}
 
 function providerColor(provider: string): string {
   switch (provider) {
@@ -86,9 +102,14 @@ function InputNode({ id }: NodeProps) {
   const status = useGraphRunStore((s) => s.status);
   const startRun = useGraphRunStore((s) => s.startRun);
   const abortRun = useGraphRunStore((s) => s.abortRun);
+  const runMode = useGraphRunStore((s) => s.runMode);
+  const setRunMode = useGraphRunStore((s) => s.setRunMode);
+  const graph = useGraphRunStore((s) => s.graph);
+  const gatePolicyOverrides = useGraphRunStore((s) => s.gatePolicyOverrides);
+  const setGatePolicyOverride = useGraphRunStore((s) => s.setGatePolicyOverride);
   const [text, setText] = useState('');
   const [err, setErr] = useState<string | null>(null);
-  const busy = status === 'running';
+  const busy = status === 'starting' || status === 'running' || status === 'paused';
   const submit = useCallback(async () => {
     if (!text.trim() || busy) return;
     setErr(null);
@@ -99,6 +120,18 @@ function InputNode({ id }: NodeProps) {
       <Handle type='source' id='out' position={Position.Bottom} />
       <div style={styles.inputNodeHead}>🟰 输入</div>
       <textarea className='nodrag' style={styles.inputTextarea} value={text} onChange={(e) => setText(e.target.value)} placeholder='输入需求，按发送启动图运行…' rows={3} disabled={busy} />
+      <div className='nodrag' style={styles.modeSegment} aria-label='运行模式'>
+        <button type='button' title='首节点可对简单问题提前完成' style={{ ...styles.modeOption, ...(runMode === 'auto' ? styles.modeOptionActive : {}) }} onClick={() => setRunMode('auto')} disabled={busy}>Auto</button>
+        <button type='button' title='始终按完整拓扑执行' style={{ ...styles.modeOption, ...(runMode === 'full' ? styles.modeOptionActive : {}) }} onClick={() => setRunMode('full')} disabled={busy}>Full</button>
+      </div>
+      {graph?.schemaVersion === 4 && graph.edges.filter((e) => e.kind === 'gate').map((gate) => (
+        <label key={gate.id} className='nodrag' style={styles.gatePolicyLabel} title={gate.id}>
+          Gate {gate.order}
+          <select style={styles.gatePolicySelect} disabled={busy} value={gatePolicyOverrides[gate.id] ?? gate.onExhausted ?? 'ask_user'} onChange={(e) => setGatePolicyOverride(gate.id, e.target.value as 'ask_user' | 'continue_best' | 'fail')}>
+            <option value='ask_user'>耗尽时暂停</option><option value='continue_best'>耗尽时放行</option><option value='fail'>耗尽时失败</option>
+          </select>
+        </label>
+      ))}
       {err && <div style={styles.inputErr}>{err}</div>}
       {busy ? (
         <button className='nodrag' style={{ ...styles.inputBtn, background: 'var(--danger)' }} onClick={() => void abortRun()}>停止</button>
@@ -138,6 +171,23 @@ function AgentNode({ id, data }: NodeProps) {
       </div>
       <div style={styles.agentLabel}>{d.label}</div>
       <Handle type='source' id='out' position={Position.Bottom} />
+      <Handle type='source' id='gate-out' position={Position.Right} style={{ background: '#60a5fa' }} />
+    </div>
+  );
+}
+
+function DecisionNode({ id, data }: NodeProps) {
+  const d = data as unknown as NodeData;
+  const active = useGraphRunStore((s) => s.activeNodeIds).includes(id);
+  const selectedGraphNodeId = useGraphRunStore((s) => s.selectedGraphNodeId);
+  const setSelectedGraphNodeId = useGraphRunStore((s) => s.setSelectedGraphNodeId);
+  const setSelectedAgentNodeKey = useGraphRunStore((s) => s.setSelectedAgentNodeKey);
+  return (
+    <div className={active ? 'agent-node-active' : undefined} style={{ ...styles.decisionNode, outline: selectedGraphNodeId === id ? '2px solid var(--accent)' : 'none' }} onClick={() => { setSelectedGraphNodeId(id); if (d.agentNodeKey) setSelectedAgentNodeKey(d.agentNodeKey); }}>
+      <Handle type='target' id='gate-in' position={Position.Left} style={{ background: '#60a5fa' }} />
+      <Handle type='source' id='rework-out' position={Position.Left} style={{ ...styles.loopHandle, top: '72%' }} />
+      <div style={styles.agentHead}><strong style={{ fontSize: 11 }}>EVALUATOR</strong>{active && <span style={styles.badge}>评估中</span>}</div>
+      <div style={styles.agentLabel}>{d.label}</div>
     </div>
   );
 }
@@ -152,14 +202,14 @@ function EndNode() {
   );
 }
 
-const nodeTypes = { input: InputNode, agent: AgentNode, end: EndNode };
+const nodeTypes = { input: InputNode, agent: AgentNode, decision: DecisionNode, end: EndNode };
 
 function toFlowNodes(graph: Graph | null, agentNameMap: Map<string, string>): Node[] {
   if (!graph) return [];
   return graph.nodes.map((n, i) => {
     const pos = n.position ?? { x: 320, y: 80 + i * 140 };
-    const name = n.type === 'agent' && n.agentNodeKey ? (agentNameMap.get(n.agentNodeKey) ?? n.agentNodeKey) : n.type === 'input' ? '输入' : '结束';
-    const data: NodeData = { label: name, kind: n.type, ...(n.type === 'agent' ? { agentNodeKey: n.agentNodeKey } : {}) };
+    const name = (n.type === 'agent' || n.type === 'decision') && n.agentNodeKey ? (agentNameMap.get(n.agentNodeKey) ?? n.agentNodeKey) : n.type === 'input' ? '输入' : '结束';
+    const data: NodeData = { label: name, kind: n.type, ...((n.type === 'agent' || n.type === 'decision') ? { agentNodeKey: n.agentNodeKey, ...(n.rubricRef ? { rubricRef: n.rubricRef } : {}) } : {}) };
     return { id: n.id, type: n.type, position: pos, data, deletable: n.type !== 'input' && n.type !== 'end' } as Node;
   });
 }
@@ -167,16 +217,20 @@ function toFlowNodes(graph: Graph | null, agentNameMap: Map<string, string>): No
 function toFlowEdges(graph: Graph | null, backIds: Set<string>): FlowEdge[] {
   if (!graph) return [];
   return graph.edges.map((e) => {
-    const isBack = backIds.has(e.id);
+    const kind = e.kind ?? (backIds.has(e.id) ? 'rework' : 'forward');
+    const isBack = kind === 'rework';
+    const isGate = kind === 'gate';
     return {
       id: e.id, source: e.source, target: e.target,
-      sourceHandle: isBack ? 'back-out' : 'out',
-      targetHandle: isBack ? 'back-in' : 'in',
+      sourceHandle: isBack ? (graph.schemaVersion === 4 ? 'rework-out' : 'back-out') : isGate ? 'gate-out' : 'out',
+      targetHandle: isBack ? 'back-in' : isGate ? 'gate-in' : 'in',
       markerEnd: { type: MarkerType.ArrowClosed },
-      style: isBack ? { stroke: '#f87171', strokeDasharray: '6 4' } : { stroke: '#9aa3ad' },
-      label: isBack ? `回边${e.maxIterations ? `·${e.maxIterations}` : '·1'}` : '',
-      labelStyle: { fill: '#f87171', fontSize: 10 },
+      style: isBack ? { stroke: '#f87171', strokeDasharray: '6 4' } : isGate ? { stroke: '#60a5fa', strokeDasharray: '6 4' } : { stroke: '#9aa3ad' },
+      label: isBack ? `返工${e.maxIterations ? `·${e.maxIterations}` : ''}` : isGate ? `Gate ${e.order ?? 1}` : '',
+      labelStyle: { fill: isGate ? '#60a5fa' : '#f87171', fontSize: 10 },
       ...(e.maxIterations != null ? { maxIterations: e.maxIterations } : {}),
+      ...(e.kind ? { kind: e.kind } : {}), ...(e.order ? { order: e.order } : {}), ...(e.maxRevisions != null ? { maxRevisions: e.maxRevisions } : {}),
+      ...(e.onExhausted ? { onExhausted: e.onExhausted } : {}), ...(e.onBlocked ? { onBlocked: e.onBlocked } : {}),
     } as FlowEdge;
   });
 }
@@ -198,11 +252,11 @@ export function GraphCanvas() {
   const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>([]);
   const [picker, setPicker] = useState(false);
   const [selEdge, setSelEdge] = useState<FlowEdge | null>(null);
-  const [createForm, setCreateForm] = useState({ provider: '', localId: '', name: '', identity: '' });
+  const [createForm, setCreateForm] = useState({ provider: '', localId: '', name: '', identity: '', nodeType: 'agent' as 'agent' | 'decision' });
   const [createErr, setCreateErr] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const skipCommit = useRef(true);
   const dirtyRef = useRef(false);
+  const initialViewport = useMemo(() => readViewport(projectId), [projectId]);
 
   const backIds = useMemo(() => computeBackEdgeIds(nodes, edges), [nodes, edges]);
 
@@ -226,7 +280,6 @@ export function GraphCanvas() {
       const sel = new Set(prev.filter((n) => n.selected).map((n) => n.id));
       return next.map((n) => (sel.has(n.id) ? { ...n, selected: true } : n));
     });
-    skipCommit.current = true; // 程序化重置不触发 commit
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graph, agentNameMap]);
 
@@ -264,6 +317,8 @@ export function GraphCanvas() {
           localId: localId.trim(),
           name: (name.trim() || localId.trim()),
           ...(identity.trim() ? { identity: identity.trim() } : {}),
+          nodeType: createForm.nodeType,
+          ...(createForm.nodeType === 'decision' ? { rubricRef: 'rubric.json' } : {}),
           graphNodeId,
           position: { x: 320, y: 80 + idx * 140 },
         }),
@@ -272,7 +327,7 @@ export function GraphCanvas() {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error ?? `创建失败 HTTP ${res.status}`);
       }
-      setCreateForm({ provider, localId: '', name: '', identity: '' });
+      setCreateForm({ provider, localId: '', name: '', identity: '', nodeType: createForm.nodeType });
       setPicker(false);
       await loadProjectGraph(); // 刷新图（含新节点）
     } catch (e) {
@@ -283,15 +338,13 @@ export function GraphCanvas() {
   }, [createForm, nodes.length, projectId, loadProjectGraph]);
 
   const commit = useCallback((ns: Node[], es: FlowEdge[]) => {
-    if (skipCommit.current) return;
     if (ns.length === 0) return;
     if (!dirtyRef.current) return; // 选中/样式等非结构变更不保存
     dirtyRef.current = false;
-    void saveGraph(buildGraph(ns, es));
-  }, [saveGraph]);
+    void saveGraph(buildGraph(ns, es, graph));
+  }, [saveGraph, graph]);
 
   useEffect(() => {
-    if (skipCommit.current) { skipCommit.current = false; return; }
     const t = setTimeout(() => commit(nodes, edges), 300);
     return () => clearTimeout(t);
   }, [nodes, edges, commit]);
@@ -301,10 +354,12 @@ export function GraphCanvas() {
     setEdges((eds) => {
       // 同向重复（如已有 A→B 又画 A→B）静默忽略，避免落 400 后画布残留坏边
       if (eds.some((e) => e.source === c.source && e.target === c.target)) return eds;
-      return addEdge<FlowEdge>({ ...c, id: `${c.source}->${c.target}`, markerEnd: { type: MarkerType.ArrowClosed } }, eds);
+      const kind = graph?.schemaVersion === 4 ? (c.sourceHandle === 'gate-out' ? 'gate' : c.sourceHandle === 'rework-out' ? 'rework' : 'forward') : undefined;
+      const gateOrder = kind === 'gate' ? eds.filter((e) => e.source === c.source && e.kind === 'gate').length + 1 : undefined;
+      return addEdge<FlowEdge>({ ...c, id: `${c.source}->${c.target}`, markerEnd: { type: MarkerType.ArrowClosed }, ...(kind ? { kind } : {}), ...(gateOrder ? { order: gateOrder, maxRevisions: 1, onExhausted: 'ask_user', onBlocked: 'ask_user' } : {}) }, eds);
     });
     dirtyRef.current = true;
-  }, [setEdges]);
+  }, [setEdges, graph?.schemaVersion]);
 
   const handleNodesChange = useCallback((changes: NodeChange[]) => {
     onNodesChange(changes);
@@ -349,12 +404,12 @@ export function GraphCanvas() {
     setSelEdge(null);
   }, [setEdges]);
 
-  const addAgentNode = useCallback((agent: AgentMeta) => {
+  const addAgentNode = useCallback((agent: AgentMeta, kind: 'agent' | 'decision' = 'agent') => {
     const id = `n${Date.now().toString(36)}`;
-    const data: NodeData = { label: agent.name, kind: 'agent', agentNodeKey: agent.nodeKey };
+    const data: NodeData = { label: agent.name, kind, agentNodeKey: agent.nodeKey, ...(kind === 'decision' ? { rubricRef: 'rubric.json' } : {}) };
     // 按顺序纵向排列（从上到下），保证左侧 loop handle 可达
     const idx = nodes.length;
-    setNodes((ns) => [...ns, { id, type: 'agent', position: { x: 320, y: 80 + idx * 140 }, data, deletable: true } as Node]);
+    setNodes((ns) => [...ns, { id, type: kind, position: { x: kind === 'decision' ? 600 : 320, y: 80 + idx * 140 }, data, deletable: true } as Node]);
     setPicker(false);
     dirtyRef.current = true;
   }, [setNodes, nodes.length]);
@@ -367,16 +422,16 @@ export function GraphCanvas() {
     dirtyRef.current = true;
   }, [nodes, setNodes]);
 
-  // 选中边编辑 maxIterations（仅回边有意义；前向边无需）
-  const updateEdge = useCallback((maxIterations: number | null) => {
+  const updateSelectedEdge = useCallback((patch: Partial<FlowEdge>) => {
     if (!selEdge) return;
-    setEdges((es) => es.map((e) => e.id === selEdge.id ? { ...e, ...(maxIterations != null ? { maxIterations } : {}) } : e));
-    setSelEdge((se) => se ? { ...se, ...(maxIterations != null ? { maxIterations } : {}) } : se);
+    setEdges((es) => es.map((e) => e.id === selEdge.id ? { ...e, ...patch } : e));
+    setSelEdge((se) => se ? { ...se, ...patch } : se);
     dirtyRef.current = true;
   }, [selEdge, setEdges]);
 
   const graphNodes = useMemo(() => graph?.nodes ?? [], [graph]);
-  const selEdgeIsBack = selEdge ? backIds.has(selEdge.id) : false;
+  const selEdgeIsBack = selEdge ? (graph?.schemaVersion === 4 ? selEdge.kind === 'rework' : backIds.has(selEdge.id)) : false;
+  const selEdgeIsGate = graph?.schemaVersion === 4 && selEdge?.kind === 'gate';
   // 节点 id → 可读标签（取画布节点 data.label；input/end 用中文）
   const labelOf = useCallback(
     (id: string): string => {
@@ -396,7 +451,7 @@ export function GraphCanvas() {
         <button style={styles.btn} onClick={() => setPicker((v) => !v)}>+ 加入节点</button>
         <button style={{ ...styles.btn, background: 'var(--surface-raised)', color: 'var(--text)' }} onClick={() => void addEndNode()}>+ 结束节点</button>
         <button style={{ ...styles.btn, background: 'var(--surface-raised)', color: 'var(--text)' }} onClick={deleteSelected}>删除选中</button>
-        <span style={styles.hint}>前向边：上节点底部 → 下节点顶部。回边：从下节点左侧 back-out 拖到上节点左侧 back-in（向上=不满足→回），默认覆盖1次（返工1轮）。</span>
+        <span style={styles.hint}>{graph?.schemaVersion === 4 ? 'Work 底部连接主链；Work 右侧连接 Gate；Decision 左侧连接返工目标。' : '前向边：上节点底部 → 下节点顶部。回边：从下节点左侧 back-out 拖到上节点左侧 back-in。'}</span>
       </div>
       {saveError && <div style={styles.errBanner} title={saveError}>⚠ {saveError}</div>}
       {picker && (
@@ -408,6 +463,11 @@ export function GraphCanvas() {
               <option key={p.id} value={p.id} disabled={p.installed === false}>{p.name}{p.installed === false ? '（未安装）' : ''}</option>
             ))}
           </select>
+          {graph?.schemaVersion === 4 && (
+            <select className='nodrag' style={styles.pickerSelect} value={createForm.nodeType} onChange={(e) => setCreateForm((f) => ({ ...f, nodeType: e.target.value as 'agent' | 'decision' }))}>
+              <option value='agent'>Work 节点</option><option value='decision'>Decision 审核节点</option>
+            </select>
+          )}
           <input className='nodrag' style={styles.pickerInput} placeholder='localId（如 coder2，小写英文/数字/_/-）' value={createForm.localId} onChange={(e) => setCreateForm((f) => ({ ...f, localId: e.target.value }))} />
           <input className='nodrag' style={styles.pickerInput} placeholder='显示名（留空用 localId）' value={createForm.name} onChange={(e) => setCreateForm((f) => ({ ...f, name: e.target.value }))} />
           <textarea className='nodrag' style={styles.pickerArea} placeholder='identity（可选，留空用默认）' rows={2} value={createForm.identity} onChange={(e) => setCreateForm((f) => ({ ...f, identity: e.target.value }))} />
@@ -415,13 +475,14 @@ export function GraphCanvas() {
           <button className='nodrag' style={{ ...styles.btn, opacity: creating ? 0.6 : 1 }} disabled={creating} onClick={() => void createNode()}>{creating ? '创建中…' : '创建并加入图'}</button>
 
           {/* 已有实例（未在图中）快速加入 */}
-          {agents.filter((a) => !graphNodes.some((n) => n.type === 'agent' && n.agentNodeKey === a.nodeKey)).length > 0 && (
+          {agents.filter((a) => !graphNodes.some((n) => (n.type === 'agent' || n.type === 'decision') && n.agentNodeKey === a.nodeKey)).length > 0 && (
             <>
               <div style={{ ...styles.pickerSection, marginTop: 6 }}>已有实例（加入图）</div>
-              {agents.filter((a) => !graphNodes.some((n) => n.type === 'agent' && n.agentNodeKey === a.nodeKey)).map((a) => (
-                <button key={a.nodeKey} style={styles.agentBtn} onClick={() => addAgentNode(a)} title={`加入 ${a.nodeKey}`}>
-                  <strong>{a.provider}</strong> · {a.name}
-                </button>
+              {agents.filter((a) => !graphNodes.some((n) => (n.type === 'agent' || n.type === 'decision') && n.agentNodeKey === a.nodeKey)).map((a) => (
+                <div key={a.nodeKey} style={{ display: 'flex', gap: 4 }}>
+                  <button style={{ ...styles.agentBtn, flex: 1 }} onClick={() => addAgentNode(a, 'agent')} title={`作为 Work 加入 ${a.nodeKey}`}><strong>{a.provider}</strong> · {a.name}</button>
+                  {graph?.schemaVersion === 4 && <button style={styles.agentBtn} onClick={() => addAgentNode(a, 'decision')} title='作为 Decision 加入'>审核</button>}
+                </div>
               ))}
             </>
           )}
@@ -431,18 +492,35 @@ export function GraphCanvas() {
         <div style={styles.edgePanel}>
           <strong style={{ fontSize: 11 }}>{labelOf(selEdge.source)} → {labelOf(selEdge.target)}</strong>
           <div style={{ fontSize: 10, color: 'var(--text-faint)' }}>id: {selEdge.id}</div>
-          <div style={{ fontSize: 10, color: selEdgeIsBack ? 'var(--danger)' : 'var(--text-faint)' }}>
-            {selEdgeIsBack ? '↩ 回边（不满足→回到目标；决策点会解析 VERDICT）' : '→ 前向边（满意→继续）'}
+          <div style={{ fontSize: 10, color: selEdgeIsBack ? 'var(--danger)' : selEdgeIsGate ? '#60a5fa' : 'var(--text-faint)' }}>
+            {selEdgeIsBack ? '返工边：审核拒绝后回到对应 Work' : selEdgeIsGate ? `Gate ${selEdge.order ?? 1}：按顺序审核候选产物` : '前向边：将 Work 产物交给下一个 Work'}
           </div>
-          {selEdgeIsBack && (
+          {graph?.schemaVersion !== 4 && selEdgeIsBack && (
             <label style={styles.edgeLabel}>maxIterations（空=默认1）
-              <input className='nodrag' style={styles.edgeInput} type='number' min={1} value={selEdge.maxIterations ?? ''} onChange={(e) => updateEdge(e.target.value === '' ? null : Math.max(1, Number(e.target.value)))} />
+              <input className='nodrag' style={styles.edgeInput} type='number' min={1} value={selEdge.maxIterations ?? ''} onChange={(e) => updateSelectedEdge({ maxIterations: e.target.value === '' ? undefined : Math.max(1, Number(e.target.value)) })} />
             </label>
+          )}
+          {selEdgeIsGate && (
+            <>
+              <label style={styles.edgeLabel}>审核顺序
+                <input className='nodrag' style={styles.edgeInput} type='number' min={1} value={selEdge.order ?? 1} onChange={(e) => updateSelectedEdge({ order: Math.max(1, Number(e.target.value)) })} />
+              </label>
+              <label style={styles.edgeLabel}>最多修订次数
+                <input className='nodrag' style={styles.edgeInput} type='number' min={0} max={20} value={selEdge.maxRevisions ?? 1} onChange={(e) => updateSelectedEdge({ maxRevisions: Math.max(0, Math.min(20, Number(e.target.value))) })} />
+              </label>
+              <label style={styles.edgeLabel}>预算耗尽
+                <select className='nodrag' style={styles.edgeInput} value={selEdge.onExhausted ?? 'ask_user'} onChange={(e) => updateSelectedEdge({ onExhausted: e.target.value as 'ask_user' | 'continue_best' | 'fail' })}><option value='ask_user'>暂停询问</option><option value='continue_best'>采用最佳版本</option><option value='fail'>运行失败</option></select>
+              </label>
+              <label style={styles.edgeLabel}>评估阻塞
+                <select className='nodrag' style={styles.edgeInput} value={selEdge.onBlocked ?? 'ask_user'} onChange={(e) => updateSelectedEdge({ onBlocked: e.target.value as 'ask_user' | 'fail' })}><option value='ask_user'>暂停询问</option><option value='fail'>运行失败</option></select>
+              </label>
+            </>
           )}
         </div>
       )}
       <div style={styles.flow}>
         <ReactFlow
+          key={projectId}
           nodes={nodes}
           edges={edges}
           nodeTypes={nodeTypes}
@@ -453,7 +531,9 @@ export function GraphCanvas() {
           onEdgeClick={onEdgeClick}
           onNodeClick={onNodeClick}
           deleteKeyCode={['Backspace', 'Delete']}
-          fitView
+          fitView={initialViewport == null}
+          defaultViewport={initialViewport ?? { x: 0, y: 0, zoom: 1 }}
+          onMoveEnd={(_, viewport) => writeViewport(projectId, viewport)}
           nodesDraggable
           proOptions={{ hideAttribution: true }}
         >
@@ -465,18 +545,20 @@ export function GraphCanvas() {
   );
 }
 
-function buildGraph(nodes: Node[], edges: FlowEdge[]): Graph {
+function buildGraph(nodes: Node[], edges: FlowEdge[], current: Graph | null): Graph {
   const graphNodes: GraphNode[] = nodes.map((n) => {
     const data = n.data as unknown as NodeData;
     const base = { id: n.id, position: n.position };
     if (data.kind === 'input') return { ...base, type: 'input' } as GraphNode;
     if (data.kind === 'end') return { ...base, type: 'end' } as GraphNode;
+    if (data.kind === 'decision') return { ...base, type: 'decision', agentNodeKey: data.agentNodeKey ?? '', rubricRef: data.rubricRef ?? 'rubric.json' } as GraphNode;
     return { ...base, type: 'agent', agentNodeKey: data.agentNodeKey ?? '' } as GraphNode;
   });
-  const graphEdges: GraphEdge[] = edges.map((e) => ({ id: `${e.source}->${e.target}`, source: e.source, target: e.target, ...(e.maxIterations != null ? { maxIterations: e.maxIterations } : {}) }));
+  const v4 = current?.schemaVersion === 4;
+  const graphEdges: GraphEdge[] = edges.map((e) => ({ id: v4 ? e.id : `${e.source}->${e.target}`, source: e.source, target: e.target, ...(v4 ? { kind: e.kind ?? 'forward', ...(e.kind === 'gate' ? { order: e.order ?? 1, maxRevisions: e.maxRevisions ?? 1, onExhausted: e.onExhausted ?? 'ask_user', onBlocked: e.onBlocked ?? 'ask_user' } : {}) } : e.maxIterations != null ? { maxIterations: e.maxIterations } : {}) }));
   const inputNode = graphNodes.find((n) => n.type === 'input')?.id ?? '__input__';
   const endNode = graphNodes.find((n) => n.type === 'end')?.id;
-  return { schemaVersion: 3, inputNode, ...(endNode ? { endNode } : {}), nodes: graphNodes, edges: graphEdges };
+  return { schemaVersion: v4 ? 4 : 3, inputNode, ...(endNode ? { endNode } : {}), maxNodeExecutions: current?.maxNodeExecutions ?? 50, nodes: graphNodes, edges: graphEdges };
 }
 
 const styles: Record<string, CSSProperties> = {
@@ -501,10 +583,16 @@ const styles: Record<string, CSSProperties> = {
   inputNode: { width: 240, background: 'var(--surface-raised)', border: '1px solid var(--border)', borderRadius: 8, padding: 8, display: 'flex', flexDirection: 'column', gap: 6 },
   inputNodeHead: { fontSize: 12, fontWeight: 700, color: 'var(--text-strong)' },
   inputTextarea: { width: '100%', resize: 'vertical', background: 'var(--background)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 4, padding: 6, fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box' },
+  modeSegment: { display: 'grid', gridTemplateColumns: '1fr 1fr', border: '1px solid var(--border)', borderRadius: 4, overflow: 'hidden' },
+  modeOption: { minWidth: 0, border: 'none', background: 'var(--background)', color: 'var(--text-muted)', padding: '4px 6px', fontSize: 11, cursor: 'pointer' },
+  modeOptionActive: { background: 'var(--accent)', color: 'var(--accent-text)', fontWeight: 700 },
+  gatePolicyLabel: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, fontSize: 10, color: 'var(--text-muted)' },
+  gatePolicySelect: { minWidth: 0, background: 'var(--background)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 4, padding: '3px 4px', fontSize: 10 },
   inputErr: { color: 'var(--danger)', fontSize: 11 },
   inputBtn: { background: 'var(--accent)', color: 'var(--accent-text)', border: 'none', borderRadius: 4, padding: '6px 10px', fontSize: 13, cursor: 'pointer' },
   inputHint: { fontSize: 10, color: 'var(--text-faint)' },
   agentNode: { width: 170, padding: 8, borderRadius: 8, color: '#e6e6e6', cursor: 'default', border: '1px solid var(--border)' },
+  decisionNode: { width: 170, padding: 8, borderRadius: 6, color: '#f3e8ff', cursor: 'default', border: '1px solid #a855f7', background: '#31203f' },
   agentHead: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, gap: 4 },
   badge: { fontSize: 10, background: 'var(--success)', color: '#001', padding: '1px 6px', borderRadius: 8, fontWeight: 700 },
   iterBadge: { fontSize: 9, background: 'var(--accent)', color: '#fff', padding: '1px 5px', borderRadius: 8 },

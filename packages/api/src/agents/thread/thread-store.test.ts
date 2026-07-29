@@ -110,7 +110,7 @@ describe('thread-store', () => {
   });
 
   it('pending run 持久化：write/read/delete（create↔start 之间重启不丢）', () => {
-    writePendingRun({ runId: 'pr1', projectId: PID, threadId: 't', turnId: 'tu', prompt: '你好', threadRevision: 1, createdAt: 1 });
+    writePendingRun({ runId: 'pr1', projectId: PID, threadId: 't', turnId: 'tu', prompt: '你好', threadRevision: 1, runMode: 'full', createdAt: 1 });
     const p = readPendingRun(PID, 'pr1');
     assert.ok(p);
     assert.equal(p?.prompt, '你好');

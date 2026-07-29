@@ -8,12 +8,14 @@ const statusColor: Record<RunSummary['status'], string> = {
   done: 'var(--success)',
   error: 'var(--danger)',
   aborted: 'var(--text-muted)',
+  paused: 'var(--warning)',
   unknown: 'var(--text-faint)',
 };
 const statusLabel: Record<RunSummary['status'], string> = {
   done: '完成',
   error: '失败',
   aborted: '中止',
+  paused: '已暂停',
   unknown: '未知',
 };
 

@@ -13,6 +13,9 @@ import graphRoutes from './routes/graph.js';
 import messagesRoutes from './routes/messages.js';
 import projectsRoutes from './routes/projects.js';
 import providersRoutes from './routes/providers.js';
+import { listProjects } from './agents/project-storage.js';
+import { listRecoverablePausedRuns } from './agents/graph/graph-run-store.js';
+import { registerRun } from './agents/run-registry.js';
 
 const PORT = parseInt(process.env.API_SERVER_PORT ?? '3004', 10);
 const HOST = process.env.API_SERVER_HOST ?? '127.0.0.1';
@@ -29,6 +32,13 @@ async function main(): Promise<void> {
   for (const failure of migrationFailures) console.error(`[storage] node migration deferred: ${failure}`);
   // 注册所有 provider（codex / claude / opencode / gemini…）
   registerAllProviders();
+
+  // durable pause 在进程重启后仍必须进入 RunRegistry，确保迁移/删除检查不会绕过 checkpoint。
+  for (const project of listProjects()) {
+    for (const meta of listRecoverablePausedRuns(project.id)) {
+      registerRun({ id: meta.runId, projectId: meta.projectId, kind: 'graph', status: 'paused', createdAt: meta.createdAt, threadId: meta.threadId, turnId: meta.turnId });
+    }
+  }
 
   // 画布作用域迁移（事务式、幂等）：verified→跳过；git-bootstrap→标记；needs-migration→迁移。
   // 不活跃运行/子进程时执行；失败保留 staging + 报告，不阻塞启动。

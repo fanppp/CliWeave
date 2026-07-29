@@ -9,8 +9,8 @@
  */
 import type { FastifyInstance, FastifyPluginCallback } from 'fastify';
 import { executeGraph } from '../agents/graph/AgentRouter.js';
-import { GraphV3Schema, GraphValidationError, readProjectGraph, validateGraph, validateProjectRun, writeProjectGraph } from '../agents/graph/graph.js';
-import type { Graph } from '../agents/graph/graph.js';
+import { GraphSchema, GraphValidationError, readProjectGraph, validateGraph, validateProjectRun, writeProjectGraph } from '../agents/graph/graph.js';
+import type { AnyGraph } from '../agents/graph/graph.js';
 import { closeRunStream, listRuns, readRun, recordRunEvent, recordRunStart } from '../agents/graph/graph-run-store.js';
 import { DEFAULT_PROJECT_ID, readProjectNodeInstance } from '../agents/project-storage.js';
 import { abortRun, registerAbort, unregisterAbort } from '../agents/abort-registry.js';
@@ -46,9 +46,9 @@ const graphRoutes: FastifyPluginCallback<GraphRouteOptions> = (app, options, don
   // 全量替换图（M2.4）。单用户单 tab：前端权威本地状态 + last-write-wins。
   // 校验顺序：schema → 结构(validateGraph) → agentNodeKey 存在(readNodeDescriptor) → 原子写。
   app.put('/api/graph', async (request, reply) => {
-    let graph: Graph;
+    let graph: AnyGraph;
     try {
-      graph = GraphV3Schema.parse(request.body);
+      graph = GraphSchema.parse(request.body);
       validateGraph(graph);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'invalid graph';

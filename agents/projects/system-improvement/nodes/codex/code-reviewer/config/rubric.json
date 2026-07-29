@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "name": "Implementation Review",
+  "criteria": [
+    { "id": "contract", "description": "完整落实任务契约且无范围漂移", "required": true, "weight": 5 },
+    { "id": "correctness", "description": "实现逻辑正确并覆盖失败路径", "required": true, "weight": 5 },
+    { "id": "compatibility", "description": "兼容性、数据和事件契约无回归", "required": true, "weight": 4 },
+    { "id": "security", "description": "无明显安全、路径、token 或权限问题", "required": true, "weight": 5 },
+    { "id": "tests", "description": "测试与验证范围匹配风险", "required": true, "weight": 4 }
+  ]
+}

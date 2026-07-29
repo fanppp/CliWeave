@@ -3,13 +3,15 @@
 import { create } from 'zustand';
 import type { Socket } from 'socket.io-client';
 import type { AgentEvent } from './chatStore';
+import { useThreadStore } from './threadStore';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3004';
 
 export interface GraphNode {
   id: string;
-  type: 'input' | 'agent' | 'end';
+  type: 'input' | 'agent' | 'decision' | 'end';
   agentNodeKey?: string;
+  rubricRef?: string;
   position?: { x: number; y: number };
 }
 export interface GraphEdge {
@@ -17,9 +19,14 @@ export interface GraphEdge {
   source: string;
   target: string;
   maxIterations?: number;
+  kind?: 'forward' | 'gate' | 'rework';
+  order?: number;
+  maxRevisions?: number;
+  onExhausted?: 'ask_user' | 'continue_best' | 'fail';
+  onBlocked?: 'ask_user' | 'fail';
 }
 export interface Graph {
-  schemaVersion: 3;
+  schemaVersion: 3 | 4;
   inputNode: string;
   endNode?: string;
   maxNodeExecutions?: number;
@@ -45,10 +52,23 @@ export type GraphEvent =
       timestamp: number;
     }
   | {
+      type: 'route_decided'; runId: string; branchId: string; nodeId: string;
+      claim: { action: 'finish' | 'forward' | 'clarify'; category: string; reason: string } | null;
+      decision: 'finish' | 'forward' | 'clarify'; reason: string; timestamp: number;
+    }
+  | { type: 'branch_done'; runId: string; branchId: string; cause: 'early_complete' | 'needs_input' | 'end'; finalArtifact: string; timestamp: number }
+  | { type: 'thread_committed'; runId: string; threadId: string; turnId: string; revision: number; status: 'completed' | 'failed' }
+  | { type: 'candidate_produced'; runId: string; branchId: string; gateId?: string; candidate: { id: string; workNodeId: string; revision: number; artifact: string }; timestamp: number }
+  | { type: 'evaluation_done'; runId: string; branchId: string; gateId: string; decisionNodeId: string; evaluation: { verdict: 'approve' | 'revise' | 'blocked'; feedback?: string; reason?: string }; timestamp: number }
+  | { type: 'best_candidate_selected'; runId: string; branchId: string; gateId: string; candidateId: string; timestamp: number }
+  | { type: 'gate_status'; runId: string; branchId: string; gateId: string; status: 'running' | 'approved' | 'exhausted' | 'blocked'; timestamp: number }
+  | { type: 'run_paused'; runId: string; projectId: string; branchId: string; gateId: string; question: string; options: ('continue_best' | 'revise_once' | 'fail')[]; resumeToken: string; expiresAt: number }
+  | { type: 'run_resumed'; runId: string; branchId: string; gateId: string }
+  | {
       type: 'run_done';
       runId: string;
       finalText: string;
-      termination: 'completed' | 'best_effort' | 'edge_limit' | 'global_limit';
+      termination: 'completed' | 'early_complete' | 'needs_input' | 'best_effort' | 'edge_limit' | 'global_limit';
       reason?: string;
     }
   | { type: 'run_aborted'; runId: string }
@@ -64,7 +84,7 @@ export interface GraphBubble {
   timestamp: number;
 }
 
-export type GraphRunStatus = 'idle' | 'starting' | 'running' | 'done' | 'error';
+export type GraphRunStatus = 'idle' | 'starting' | 'running' | 'paused' | 'done' | 'error';
 
 interface GraphRunState {
   graph: Graph | null;
@@ -88,6 +108,12 @@ interface GraphRunState {
   socket: Socket | null;
   /** 上次保存图失败的原因（画布顶部红条显示，空=无错） */
   saveError: string | null;
+  runMode: 'auto' | 'full';
+  gatePolicyOverrides: Record<string, 'ask_user' | 'continue_best' | 'fail'>;
+  paused: Extract<GraphEvent, { type: 'run_paused' }> | null;
+  setRunMode: (mode: 'auto' | 'full') => void;
+  setGatePolicyOverride: (gateId: string, policy: 'ask_user' | 'continue_best' | 'fail') => void;
+  resumeRun: (action: 'continue_best' | 'revise_once' | 'fail') => Promise<void>;
   loadGraph: (g: Graph) => void;
   setGraph: (g: Graph) => void;
   saveGraph: (g: Graph) => Promise<void>;
@@ -129,9 +155,14 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
   agentNameMap: {},
   socket: null,
   saveError: null,
+  runMode: 'auto',
+  gatePolicyOverrides: {},
+  paused: null,
+  setRunMode: (runMode) => set({ runMode }),
+  setGatePolicyOverride: (gateId, policy) => set((s) => ({ gatePolicyOverrides: { ...s.gatePolicyOverrides, [gateId]: policy } })),
   loadGraph: (g) => set({ graph: g }),
   setGraph: (g) => set({ graph: g }),
-  setProjectId: (id) => set({ projectId: id, graph: null, bubbles: [], status: 'idle', activeNodeIds: [], nodeIterations: {}, currentRunId: null, selectedAgentNodeKey: null, selectedGraphNodeId: null, replayGraph: null }),
+  setProjectId: (id) => set({ projectId: id, graph: null, bubbles: [], status: 'idle', activeNodeIds: [], nodeIterations: {}, currentRunId: null, selectedAgentNodeKey: null, selectedGraphNodeId: null, replayGraph: null, gatePolicyOverrides: {}, paused: null }),
   loadProjectGraph: async () => {
     const pid = get().projectId;
     try {
@@ -167,40 +198,57 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
   setAgentNameMap: (m) => set({ agentNameMap: m }),
   setSocket: (s) => set({ socket: s }),
   setCurrentRun: (runId) => set({ currentRunId: runId }),
-  reset: () => set({ bubbles: [], status: 'idle', activeNodeIds: [], nodeIterations: {}, currentRunId: null, replayGraph: null }),
+  reset: () => set({ bubbles: [], status: 'idle', activeNodeIds: [], nodeIterations: {}, currentRunId: null, replayGraph: null, paused: null }),
   startRun: async (prompt: string) => {
     const socket = get().socket;
     const pid = get().projectId;
     if (!socket || !socket.connected) throw new Error('WebSocket 未连接');
+    const thread = await useThreadStore.getState().prepareRun();
     get().reset();
     const createRes = await fetch(`${API_URL}/api/projects/${pid}/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ message: prompt, runMode: get().runMode, gatePolicyOverrides: get().gatePolicyOverrides, ...(thread ?? {}) }),
     });
     if (!createRes.ok) throw new Error(`创建运行失败: ${(await createRes.json()).error ?? createRes.status}`);
-    const { runId } = (await createRes.json()) as { runId: string };
+    const { runId, threadId, threadRevision } = (await createRes.json()) as { runId: string; threadId: string; threadRevision: number };
+    await useThreadStore.getState().adoptCreatedThread(threadId, threadRevision);
     // starting：run 已创建、首个 node_started 前的窗口（供项目切换仲裁识别"忙"）
     set({ currentRunId: runId, status: 'starting' });
-    // join_graph 用 ack 回调确认已入 room 再 start（防丢首批事件）
-    await new Promise<void>((resolve, reject) => {
-      socket.timeout(5000).emit('join_graph', runId, (err?: unknown) => {
-        if (err) reject(new Error('join_graph 超时'));
-        else resolve();
+    try {
+      // join_graph 用 ack 回调确认已入 room 再 start（防丢首批事件）
+      await new Promise<void>((resolve, reject) => {
+        socket.timeout(5000).emit('join_graph', runId, (err?: unknown) => {
+          if (err) reject(new Error('join_graph 超时'));
+          else resolve();
+        });
       });
-    });
-    const startRes = await fetch(`${API_URL}/api/projects/${pid}/run/${runId}/start`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: '{}',
-    });
-    if (!startRes.ok) throw new Error(`启动运行失败: ${(await startRes.json()).error ?? startRes.status}`);
+      const startRes = await fetch(`${API_URL}/api/projects/${pid}/run/${runId}/start`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      if (!startRes.ok) throw new Error(`启动运行失败: ${(await startRes.json()).error ?? startRes.status}`);
+    } catch (error) {
+      await fetch(`${API_URL}/api/projects/${pid}/run/${runId}/abort`, { method: 'POST' }).catch(() => undefined);
+      set({ status: 'error', currentRunId: null, activeNodeIds: [] });
+      await useThreadStore.getState().loadProject(pid);
+      throw error;
+    }
   },
   abortRun: async () => {
     const runId = get().currentRunId;
     const pid = get().projectId;
     if (!runId) return;
     await fetch(`${API_URL}/api/projects/${pid}/run/${runId}/abort`, { method: 'POST' });
+  },
+  resumeRun: async (action) => {
+    const { paused, projectId, currentRunId } = get();
+    if (!paused || !currentRunId) return;
+    const response = await fetch(`${API_URL}/api/projects/${projectId}/run/${currentRunId}/resume`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ branchId: paused.branchId, resumeToken: paused.resumeToken, action }),
+    });
+    if (!response.ok) throw new Error(`恢复失败: ${(await response.json()).error ?? response.status}`);
+    set({ status: 'running', paused: null });
   },
   pushEvent: (event) =>
     set((s) => {
@@ -253,9 +301,38 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
           };
           return { ...s, bubbles: [...s.bubbles, bubble] };
         }
+        case 'route_decided': {
+          const label = event.decision === 'finish' ? '提前完成' : event.decision === 'clarify' ? '等待补充信息' : '继续完整流程';
+          const bubble: GraphBubble = { id: nextId(), nodeId: event.nodeId, role: 'system', content: `路由：${label}\n${event.reason}`, eventType: 'route_decided', timestamp: event.timestamp };
+          return { ...s, bubbles: [...s.bubbles, bubble] };
+        }
+        case 'branch_done':
+          return s;
+        case 'thread_committed':
+          void useThreadStore.getState().handleCommitted(event.threadId);
+          return { ...s, status: event.status === 'completed' ? 'done' : s.status };
+        case 'candidate_produced': {
+          const bubble: GraphBubble = { id: nextId(), nodeId: event.candidate.workNodeId, role: 'system', content: `候选版本 r${event.candidate.revision} 已产生`, eventType: event.type, timestamp: event.timestamp };
+          return { ...s, bubbles: [...s.bubbles, bubble] };
+        }
+        case 'evaluation_done': {
+          const detail = event.evaluation.feedback ?? event.evaluation.reason ?? '';
+          const bubble: GraphBubble = { id: nextId(), nodeId: event.decisionNodeId, role: 'system', content: `评估：${event.evaluation.verdict}${detail ? `\n${detail}` : ''}`, eventType: event.type, timestamp: event.timestamp };
+          return { ...s, bubbles: [...s.bubbles, bubble] };
+        }
+        case 'gate_status':
+        case 'best_candidate_selected':
+        case 'run_resumed':
+          return s;
+        case 'run_paused': {
+          const bubble: GraphBubble = { id: nextId(), nodeId: '__run__', role: 'system', content: `${event.question}\nGate: ${event.gateId}`, eventType: event.type, timestamp: Date.now() };
+          return { ...s, bubbles: [...s.bubbles, bubble], status: 'paused', paused: event, activeNodeIds: [] };
+        }
         case 'run_done': {
           const label =
             event.termination === 'completed' ? '完成'
+            : event.termination === 'early_complete' ? '智能提前完成'
+            : event.termination === 'needs_input' ? '需要补充信息'
             : event.termination === 'best_effort' ? '预算耗尽·best-effort 放行'
             : event.termination === 'edge_limit' ? '达到最大迭代（legacy）'
             : '达到全局执行上限';
@@ -267,7 +344,9 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
             eventType: 'run_done',
             timestamp: Date.now(),
           };
-          return { ...s, bubbles: [...s.bubbles, bubble], status: 'done', activeNodeIds: [] };
+          // run_done 本身就是公开终态；thread_committed 仅刷新 durable Thread revision。
+          // 不能依赖后一事件收口 UI：旧服务/旧 JSONL/瞬时断线都可能没有该事件。
+          return { ...s, bubbles: [...s.bubbles, bubble], status: 'done', activeNodeIds: [], paused: null };
         }
         case 'run_aborted': {
           const bubble: GraphBubble = {

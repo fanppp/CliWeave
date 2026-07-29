@@ -3,6 +3,7 @@
 import { create } from 'zustand';
 import { useChatStore } from './chatStore';
 import { useGraphRunStore } from './graphRunStore';
+import { useThreadStore } from './threadStore';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3004';
 const CURRENT_PROJECT_KEY = 'cliweave.currentProject';
@@ -11,7 +12,7 @@ const CURRENT_PROJECT_KEY = 'cliweave.currentProject';
 export function canSwitchProject(): boolean {
   const chatBusy = useChatStore.getState().isStreaming;
   const graphStatus = useGraphRunStore.getState().status;
-  const graphBusy = graphStatus === 'starting' || graphStatus === 'running';
+  const graphBusy = graphStatus === 'starting' || graphStatus === 'running' || graphStatus === 'paused';
   return !chatBusy && !graphBusy;
 }
 
@@ -65,6 +66,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           await useGraphRunStore.getState().loadProjectGraph();
         }
         useChatStore.getState().setProjectId(restore);
+        await useThreadStore.getState().loadProject(restore);
       }
     } catch {
       // 忽略
@@ -87,6 +89,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     useGraphRunStore.getState().setProjectId(meta.id);
     await useGraphRunStore.getState().loadProjectGraph();
     useChatStore.getState().setProjectId(meta.id);
+    await useThreadStore.getState().loadProject(meta.id);
     return meta.id;
   },
   switchProject: (id) => {
@@ -96,5 +99,6 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     useGraphRunStore.getState().setProjectId(id);
     void useGraphRunStore.getState().loadProjectGraph();
     useChatStore.getState().setProjectId(id);
+    void useThreadStore.getState().loadProject(id);
   },
 }));

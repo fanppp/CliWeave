@@ -43,13 +43,16 @@ import {
   transitionRunStatus,
 } from '../agents/run-registry.js';
 import { resolveInstanceDescriptorPaths } from '../agents/node-instance.js';
-import { executeGraph } from '../agents/graph/AgentRouter.js';
+import { executeGraph, runAgentNode } from '../agents/graph/AgentRouter.js';
+import { resumeEvaluatorOptimizerGraph, verifyCheckpointToken, type HarnessCheckpoint } from '../agents/graph/EvaluatorOptimizerRouter.js';
 import { invokeAgentWithPolicy } from '../agents/invoke-agent.js';
 import { buildThreadContext, buildServerContext } from '../agents/context-builder.js';
+import { snapshotRubrics } from '../agents/graph/evaluation.js';
 import {
   closeRunStream,
   listRuns,
   readRun,
+  readPersistedRun,
   recordRunEvent,
   recordRunStart,
 } from '../agents/graph/graph-run-store.js';
@@ -69,18 +72,19 @@ import {
   ThreadConflictError,
 } from '../agents/thread/thread-store.js';
 import {
-  GraphV3Schema,
+  GraphSchema,
   GraphValidationError,
   readProjectGraph,
   validateGraph,
   validateProjectRun,
   writeProjectGraph,
+  type AnyGraph,
+  type AnyGraphNode,
   type Graph,
-  type GraphAgentNode,
 } from '../agents/graph/graph.js';
 import { resolveGlob } from '../utils/glob.js';
 import { getProjectRoot } from '../utils/project-root.js';
-import type { SocketManager } from '../infrastructure/websocket/SocketManager.js';
+import type { PublicGraphEvent, SocketManager } from '../infrastructure/websocket/SocketManager.js';
 
 export interface ProjectsRouteOptions {
   socketManager: SocketManager;
@@ -197,17 +201,25 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
 
   app.put<{ Params: { projectId: string } }>('/api/projects/:projectId/graph', async (request, reply) => {
     const { projectId } = request.params;
-    let graph: Graph;
+    let graph: AnyGraph;
     try {
-      graph = GraphV3Schema.parse(request.body);
+      graph = GraphSchema.parse(request.body);
       validateGraph(graph);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'invalid graph';
       return reply.code(400).send({ error: msg });
     }
+    try {
+      const existing = readProjectGraph(projectId);
+      if (existing.schemaVersion === 4 && graph.schemaVersion !== 4) {
+        return reply.code(409).send({ error: 'refusing implicit graph schema downgrade from V4; use an explicit migration tool' });
+      }
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
     const missing: string[] = [];
     for (const node of graph.nodes) {
-      if (node.type !== 'agent') continue;
+      if (node.type !== 'agent' && node.type !== 'decision') continue;
       try {
         readProjectNodeInstance(projectId, node.agentNodeKey);
       } catch {
@@ -228,7 +240,7 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
     const { projectId } = request.params;
     const body = (request.body ?? {}) as {
       provider?: unknown; localId?: unknown; name?: unknown; identity?: unknown; model?: unknown;
-      graphNodeId?: unknown; position?: unknown; connectFrom?: unknown;
+      graphNodeId?: unknown; position?: unknown; connectFrom?: unknown; nodeType?: unknown; rubricRef?: unknown;
     };
     const provider = typeof body.provider === 'string' ? body.provider : '';
     const localId = typeof body.localId === 'string' ? body.localId.trim() : '';
@@ -237,17 +249,28 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
     if (!provider || !localId || !name || !graphNodeId) {
       return reply.code(400).send({ error: 'provider, localId, name, graphNodeId are required' });
     }
+    const requestedType = body.nodeType == null ? 'agent' : body.nodeType;
+    if (requestedType !== 'agent' && requestedType !== 'decision') {
+      return reply.code(400).send({ error: "nodeType must be 'agent' or 'decision'" });
+    }
+    const rubricRef = typeof body.rubricRef === 'string' && body.rubricRef.trim() ? body.rubricRef.trim() : 'rubric.json';
+    if (requestedType === 'decision' && (!/^[a-zA-Z0-9._/-]+$/.test(rubricRef) || isAbsolute(rubricRef) || rubricRef.split(/[\\/]/).includes('..'))) {
+      return reply.code(400).send({ error: 'rubricRef must be a relative tail within node config' });
+    }
     const meta = PROVIDERS.find((p) => p.id === provider);
     if (!meta) return reply.code(400).send({ error: `unknown provider: ${provider}` });
     if (!meta.installed) return reply.code(409).send({ error: `provider '${provider}' is disabled (not installed)` });
 
     const nodeKey = `${provider}:${localId}`;
     // 预校验图：graphNodeId 不存在、connectFrom 存在
-    let graph: Graph;
+    let graph: AnyGraph;
     try {
       graph = readProjectGraph(projectId);
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });
+    }
+    if (requestedType === 'decision' && graph.schemaVersion !== 4) {
+      return reply.code(409).send({ error: 'decision nodes require a V4 graph' });
     }
     if (graph.nodes.some((n) => n.id === graphNodeId)) {
       return reply.code(409).send({ error: `graph node already exists: ${graphNodeId}` });
@@ -256,30 +279,41 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
     if (connectFrom && !graph.nodes.some((n) => n.id === connectFrom)) {
       return reply.code(400).send({ error: `connectFrom node not found: ${connectFrom}` });
     }
-    if (graph.nodes.some((n) => n.type === 'agent' && 'agentNodeKey' in n && n.agentNodeKey === nodeKey)) {
+    if (graph.nodes.some((n) => (n.type === 'agent' || n.type === 'decision') && n.agentNodeKey === nodeKey)) {
       return reply.code(409).send({ error: `node instance already in graph: ${nodeKey}` });
     }
 
     // 1. 实例化（建实例目录）
     try {
-      instantiateNodeInstance(projectId, nodeKey, {
+      const instance = instantiateNodeInstance(projectId, nodeKey, {
         name,
         command: meta.command,
         memoryHome: meta.memoryHome,
         ...(typeof body.model === 'string' && body.model.trim() ? { model: body.model.trim() } : meta.defaultModel ? { model: meta.defaultModel } : {}),
         ...(typeof body.identity === 'string' ? { identity: body.identity } : {}),
       });
+      if (requestedType === 'decision') {
+        const rubricFile = join(instance.nodeDir, 'config', rubricRef);
+        if (!existsSync(rubricFile)) {
+          mkdirSync(dirname(rubricFile), { recursive: true });
+          writeFileSync(rubricFile, JSON.stringify({ schemaVersion: 1, name: `${name} rubric`, criteria: [{ id: 'correctness', description: '产物正确、完整并满足原始需求', required: true, weight: 1 }] }, null, 2) + '\n', 'utf-8');
+        }
+      }
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });
     }
     // 2. 改图（加节点 + 可选边）。失败 → 回滚实例目录。
     const position = (body.position && typeof body.position === 'object' ? body.position : { x: 320, y: 80 + graph.nodes.length * 140 }) as { x: number; y: number };
-    const newAgentNode: GraphAgentNode = { id: graphNodeId, type: 'agent', agentNodeKey: nodeKey, position };
+    const newAgentNode = (requestedType === 'decision'
+      ? { id: graphNodeId, type: 'decision', agentNodeKey: nodeKey, rubricRef, position }
+      : { id: graphNodeId, type: 'agent', agentNodeKey: nodeKey, position }) as AnyGraphNode;
     const newNodes = [...graph.nodes, newAgentNode];
     const newEdges = connectFrom
-      ? [...graph.edges, { id: `${connectFrom}->${graphNodeId}`, source: connectFrom, target: graphNodeId }]
+      ? [...graph.edges, graph.schemaVersion === 4
+          ? { id: `${connectFrom}->${graphNodeId}`, source: connectFrom, target: graphNodeId, kind: requestedType === 'decision' ? 'gate' : 'forward', ...(requestedType === 'decision' ? { order: 1, maxRevisions: 1, onExhausted: 'ask_user', onBlocked: 'ask_user' } : {}) }
+          : { id: `${connectFrom}->${graphNodeId}`, source: connectFrom, target: graphNodeId }]
       : graph.edges;
-    const newGraph: Graph = { ...graph, nodes: newNodes, edges: newEdges };
+    const newGraph = { ...graph, nodes: newNodes, edges: newEdges } as AnyGraph;
     try {
       writeProjectGraph(projectId, newGraph);
     } catch (err) {
@@ -294,7 +328,7 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
     '/api/projects/:projectId/graph/nodes/:graphNodeId',
     async (request, reply) => {
       const { projectId, graphNodeId } = request.params;
-      let graph: Graph;
+      let graph: AnyGraph;
       try {
         graph = readProjectGraph(projectId);
       } catch (err) {
@@ -303,11 +337,11 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
       const target = graph.nodes.find((n) => n.id === graphNodeId);
       if (!target || target.type !== 'agent') return reply.code(404).send({ error: `agent graph node not found: ${graphNodeId}` });
       const nodeKey = target.agentNodeKey;
-      const newGraph: Graph = {
+      const newGraph = {
         ...graph,
         nodes: graph.nodes.filter((n) => n.id !== graphNodeId),
         edges: graph.edges.filter((e) => e.source !== graphNodeId && e.target !== graphNodeId),
-      };
+      } as AnyGraph;
       try {
         writeProjectGraph(projectId, newGraph);
       } catch (err) {
@@ -450,7 +484,7 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
     async (request, reply) => {
       const { projectId, nodeKey } = request.params;
       // 图引用检查
-      let graph: Graph;
+      let graph: AnyGraph;
       try {
         graph = readProjectGraph(projectId);
       } catch (err) {
@@ -613,10 +647,26 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
       prompt?: unknown; // 兼容旧前端 {prompt}
       threadId?: unknown;
       expectedThreadRevision?: unknown;
+      runMode?: unknown;
+      gatePolicyOverrides?: unknown;
     };
     const message =
       typeof body.message === 'string' ? body.message : typeof body.prompt === 'string' ? body.prompt : '';
     if (message.trim().length === 0) return reply.code(400).send({ error: 'message is required' });
+    // 旧客户端不传时保持 full；quick 属 Step 5 RunEntry，当前明确拒绝，避免伪实现。
+    const runMode = body.runMode == null ? 'full' : body.runMode;
+    if (runMode !== 'auto' && runMode !== 'full' && runMode !== 'quick') {
+      return reply.code(400).send({ error: 'runMode must be auto, full, or quick' });
+    }
+    if (runMode === 'quick') return reply.code(409).send({ error: 'quick mode is not available yet' });
+    const gatePolicyOverrides: Record<string, 'ask_user' | 'continue_best' | 'fail'> = {};
+    if (body.gatePolicyOverrides != null) {
+      if (typeof body.gatePolicyOverrides !== 'object' || Array.isArray(body.gatePolicyOverrides)) return reply.code(400).send({ error: 'gatePolicyOverrides must be an object' });
+      for (const [gateId, policy] of Object.entries(body.gatePolicyOverrides as Record<string, unknown>)) {
+        if (policy !== 'ask_user' && policy !== 'continue_best' && policy !== 'fail') return reply.code(400).send({ error: `invalid gate policy for ${gateId}` });
+        gatePolicyOverrides[gateId] = policy;
+      }
+    }
     try {
       readProjectMeta(projectId);
     } catch (err) {
@@ -651,6 +701,8 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
         turnId: turn.turnId,
         prompt: message,
         threadRevision: turn.revision,
+        runMode,
+        ...(Object.keys(gatePolicyOverrides).length ? { gatePolicyOverrides } : {}),
         createdAt: Date.now(),
       });
       registerRun({
@@ -662,7 +714,7 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
         threadId,
         turnId: turn.turnId,
       });
-      return reply.code(202).send({ status: 'created', runId, threadId, turnId: turn.turnId });
+      return reply.code(202).send({ status: 'created', runId, threadId, turnId: turn.turnId, threadRevision: turn.revision });
     } catch (err) {
       if (err instanceof ThreadConflictError) return reply.code(409).send({ error: err.message });
       throw err;
@@ -693,7 +745,7 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
         });
       }
 
-      let graph: Graph;
+      let graph: AnyGraph;
       try {
         resolveProjectPath(projectId); // 运行前重检项目路径
         graph = readProjectGraph(projectId);
@@ -710,7 +762,20 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
         return reply.code(400).send({ error: msg });
       }
 
-      const { prompt, threadId, turnId, threadRevision } = pending;
+      const { prompt, threadId, turnId, threadRevision, runMode = 'full', gatePolicyOverrides = {} } = pending;
+      if (graph.schemaVersion === 4) {
+        const gateIds = new Set(graph.edges.filter((e) => e.kind === 'gate').map((e) => e.id));
+        const unknown = Object.keys(gatePolicyOverrides).find((id) => !gateIds.has(id));
+        if (unknown) {
+          await failTurn(projectId, threadId, runId, turnId, { status: 'error', reason: `unknown gate override '${unknown}'` });
+          deletePendingRun(projectId, runId); transitionRunStatus(runId, 'error');
+          return reply.code(400).send({ error: `gatePolicyOverrides references unknown gate '${unknown}'` });
+        }
+      } else if (Object.keys(gatePolicyOverrides).length) {
+        await failTurn(projectId, threadId, runId, turnId, { status: 'error', reason: 'gate overrides require V4' });
+        deletePendingRun(projectId, runId); transitionRunStatus(runId, 'error');
+        return reply.code(400).send({ error: 'gatePolicyOverrides require a V4 graph' });
+      }
       deletePendingRun(projectId, runId);
       transitionRunStatus(runId, 'running');
       const controller = registerAbort(runId);
@@ -720,6 +785,7 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
       const local = readProjectLocal(projectId);
       const serverContext = buildServerContext(local?.location);
       const { prefix: contextPrefix, snapshot: contextSnapshot } = buildThreadContext(projectId, threadId, { serverContext });
+      const rubrics = graph.schemaVersion === 4 ? snapshotRubrics(projectId, graph) : undefined;
       recordRunStart(
         projectId,
         runId,
@@ -727,47 +793,68 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
         graph,
         { threadId, turnId, threadRevision },
         contextSnapshot,
+        runMode,
+        rubrics,
+        gatePolicyOverrides,
       );
       reply.code(202).send({ status: 'started', runId });
 
       setImmediate(() => {
+        let terminalEvent: Extract<PublicGraphEvent, { type: 'run_done' | 'run_error' | 'run_aborted' }> | null = null;
         executeGraph(prompt, graph, {
           runId,
           projectId,
           contextPrefix,
+          runMode,
+          gatePolicyOverrides,
+          rubrics,
           emit: (event) => {
             socketManager.broadcastGraph(event);
-            // 终态由事件决定（finally 只清理，不得覆盖 done/error/aborted）+ Thread turn 生命周期
+            // 先广播图终态；Thread durable commit 在 executeGraph resolve 后顺序执行。
             if (event.type === 'run_done') {
-              transitionRunStatus(runId, 'done');
-              if (threadId && turnId) {
-                void completeTurn(projectId, threadId, runId, turnId, {
-                  finalArtifact: event.finalText,
-                  quality: {
-                    status: 'done',
-                    termination: event.termination,
-                    ...(event.reason ? { reason: event.reason } : {}),
-                  },
-                });
-              }
+              terminalEvent = event;
             } else if (event.type === 'run_error') {
-              transitionRunStatus(runId, 'error');
-              if (threadId && turnId) void failTurn(projectId, threadId, runId, turnId, { status: 'error', reason: event.error });
+              terminalEvent = event;
             } else if (event.type === 'run_aborted') {
-              transitionRunStatus(runId, 'aborted');
-              if (threadId && turnId) void failTurn(projectId, threadId, runId, turnId, { status: 'aborted' });
+              terminalEvent = event;
+            } else if (event.type === 'run_paused') {
+              transitionRunStatus(runId, 'paused');
             }
           },
           record: (event) => {
             recordRunEvent(projectId, runId, event);
           },
           signal: controller.signal,
-        })
+        }).then(async () => {
+            if (!terminalEvent) return;
+            const terminal: Extract<PublicGraphEvent, { type: 'run_done' | 'run_error' | 'run_aborted' }> = terminalEvent;
+            const updated = terminal.type === 'run_done'
+              ? await completeTurn(projectId, threadId, runId, turnId, {
+                  finalArtifact: terminal.finalText,
+                  quality: {
+                    status: 'done', termination: terminal.termination,
+                    ...(terminal.reason ? { reason: terminal.reason } : {}),
+                  },
+                })
+              : await failTurn(projectId, threadId, runId, turnId, {
+                  status: terminal.type === 'run_aborted' ? 'aborted' : 'error',
+                  ...(terminal.type === 'run_error' ? { reason: terminal.error } : {}),
+                });
+            transitionRunStatus(runId, terminal.type === 'run_done' ? 'done' : terminal.type === 'run_aborted' ? 'aborted' : 'error');
+            if (updated) {
+              const committed = {
+                type: 'thread_committed', runId, threadId, turnId, revision: updated.revision,
+                status: terminal.type === 'run_done' ? 'completed' : 'failed',
+              } as const;
+              recordRunEvent(projectId, runId, committed);
+              socketManager.broadcastGraph(committed);
+            }
+          })
           .catch((err) => {
             const msg = `graph execution crashed: ${(err as Error).message}`;
             socketManager.broadcastGraph({ type: 'run_error', runId, error: msg });
             transitionRunStatus(runId, 'error');
-            if (threadId && turnId) void failTurn(projectId, threadId, runId, turnId, { status: 'error', reason: msg });
+            return failTurn(projectId, threadId, runId, turnId, { status: 'error', reason: msg });
           })
           .finally(() => {
             unregisterAbort(runId);
@@ -778,10 +865,74 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
   );
 
   app.post<{ Params: { projectId: string; runId: string } }>(
+    '/api/projects/:projectId/run/:runId/resume',
+    async (request, reply) => {
+      const { projectId, runId } = request.params;
+      const body = (request.body ?? {}) as { branchId?: unknown; resumeToken?: unknown; action?: unknown };
+      if (typeof body.branchId !== 'string' || typeof body.resumeToken !== 'string' || !['continue_best', 'revise_once', 'fail'].includes(String(body.action))) {
+        return reply.code(400).send({ error: 'branchId, resumeToken and valid action are required' });
+      }
+      const persisted = readPersistedRun(projectId, runId);
+      if (!persisted.meta || persisted.meta.graph.schemaVersion !== 4) return reply.code(404).send({ error: 'paused V4 run not found' });
+      const checkpointEvent = [...persisted.events].reverse().find((event) => event.type === 'branch_checkpoint' && event.branchId === body.branchId);
+      if (!checkpointEvent || checkpointEvent.type !== 'branch_checkpoint') return reply.code(404).send({ error: 'branch checkpoint not found' });
+      const checkpoint = checkpointEvent.payload as HarnessCheckpoint;
+      const consumed = persisted.events.some((event) => event.type === 'run_state' && event.phase === 'resume_token_consumed' && (event.payload as { tokenHash?: unknown })?.tokenHash === checkpoint.tokenHash);
+      if (consumed || !verifyCheckpointToken(checkpoint, body.resumeToken)) return reply.code(409).send({ error: 'resume token is invalid, expired, or already used' });
+      const entry = getRun(runId);
+      if (entry && entry.status !== 'paused') return reply.code(409).send({ error: `run is not paused (status=${entry.status})` });
+      const threadId = persisted.meta.threadId;
+      const turnId = persisted.meta.turnId;
+      if (!threadId || !turnId) return reply.code(409).send({ error: 'paused run has no Thread checkpoint' });
+      if (!readThread(projectId, threadId)) return reply.code(409).send({ error: 'paused run Thread no longer exists' });
+      if (!entry) registerRun({ id: runId, projectId, kind: 'graph', status: 'paused', createdAt: persisted.meta.createdAt, threadId, turnId });
+      recordRunEvent(projectId, runId, { type: 'run_state', runId, phase: 'resume_token_consumed', payload: { tokenHash: checkpoint.tokenHash, branchId: body.branchId, consumedAt: Date.now() } });
+      transitionRunStatus(runId, 'running');
+      const controller = registerAbort(runId);
+      const registered = getRun(runId); if (registered) registered.controller = controller;
+      const local = readProjectLocal(projectId);
+      const { prefix: contextPrefix } = buildThreadContext(projectId, threadId, { serverContext: buildServerContext(local?.location) });
+      reply.code(202).send({ status: 'resuming', runId, branchId: body.branchId });
+      setImmediate(() => {
+        let terminal: Extract<PublicGraphEvent, { type: 'run_done' | 'run_error' | 'run_aborted' }> | null = null;
+        resumeEvaluatorOptimizerGraph(persisted.meta!.prompt, persisted.meta!.graph as Extract<AnyGraph, { schemaVersion: 4 }>, {
+          runId, projectId, contextPrefix, runMode: persisted.meta!.runMode, gatePolicyOverrides: persisted.meta!.gatePolicyOverrides, rubrics: persisted.meta!.rubrics,
+          signal: controller.signal,
+          emit: (event) => { socketManager.broadcastGraph(event); if (event.type === 'run_done' || event.type === 'run_error' || event.type === 'run_aborted') terminal = event; else if (event.type === 'run_paused') transitionRunStatus(runId, 'paused'); },
+          record: (event) => recordRunEvent(projectId, runId, event),
+        }, checkpoint, body.action as 'continue_best' | 'revise_once' | 'fail', runAgentNode).then(async () => {
+          if (!terminal) return;
+          const event: Extract<PublicGraphEvent, { type: 'run_done' | 'run_error' | 'run_aborted' }> = terminal;
+          const updated = event.type === 'run_done'
+            ? await completeTurn(projectId, threadId, runId, turnId, { finalArtifact: event.finalText, quality: { status: 'done', termination: event.termination, ...(event.reason ? { reason: event.reason } : {}) } })
+            : await failTurn(projectId, threadId, runId, turnId, { status: event.type === 'run_aborted' ? 'aborted' : 'error', ...(event.type === 'run_error' ? { reason: event.error } : {}) });
+          transitionRunStatus(runId, event.type === 'run_done' ? 'done' : event.type === 'run_aborted' ? 'aborted' : 'error');
+          if (updated) {
+            const committed = { type: 'thread_committed', runId, threadId, turnId, revision: updated.revision, status: event.type === 'run_done' ? 'completed' : 'failed' } as const;
+            recordRunEvent(projectId, runId, committed); socketManager.broadcastGraph(committed);
+          }
+        }).catch(async (error) => {
+          const message = `resume crashed: ${(error as Error).message}`;
+          const event = { type: 'run_error', runId, error: message } as const;
+          recordRunEvent(projectId, runId, event); socketManager.broadcastGraph(event); transitionRunStatus(runId, 'error');
+          await failTurn(projectId, threadId, runId, turnId, { status: 'error', reason: message });
+        }).finally(() => { unregisterAbort(runId); closeRunStream(projectId, runId); });
+      });
+    },
+  );
+
+  app.post<{ Params: { projectId: string; runId: string } }>(
     '/api/projects/:projectId/run/:runId/abort',
     async (request, reply) => {
       const { projectId, runId } = request.params;
       const entry = getRun(runId);
+      if (entry && entry.projectId === projectId && entry.status === 'paused') {
+        if (entry.threadId && entry.turnId) await failTurn(projectId, entry.threadId, runId, entry.turnId, { status: 'aborted', reason: 'paused run discarded' });
+        transitionRunStatus(runId, 'aborted');
+        const event = { type: 'run_aborted', runId } as const;
+        recordRunEvent(projectId, runId, event); socketManager.broadcastGraph(event); closeRunStream(projectId, runId);
+        return reply.code(202).send({ status: 'aborted', runId });
+      }
       // pending（未 start）：清 activeRunId + turn_failed aborted + 删 pending
       if (entry && entry.projectId === projectId && entry.status === 'pending') {
         if (entry.threadId && entry.turnId) await abortPendingTurn(projectId, entry.threadId, runId, entry.turnId);

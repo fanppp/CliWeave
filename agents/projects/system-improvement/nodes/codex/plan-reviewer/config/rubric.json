@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "name": "Task Contract Quality",
+  "criteria": [
+    { "id": "intent", "description": "准确理解用户目标且无需求漂移", "required": true, "weight": 5 },
+    { "id": "evidence", "description": "关键现状结论有仓库证据支持", "required": true, "weight": 4 },
+    { "id": "scope", "description": "范围、非目标和兼容边界明确", "required": true, "weight": 4 },
+    { "id": "feasibility", "description": "实施顺序可执行且无关键缺口", "required": true, "weight": 5 },
+    { "id": "acceptance", "description": "验收标准具体、可验证、覆盖风险", "required": true, "weight": 5 }
+  ]
+}

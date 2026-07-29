@@ -12,7 +12,9 @@ import { formatInstanceKey } from '../instance-key.js';
 import { projectRunsDir } from '../project-storage.js';
 import type { PersistedRunEvent, GraphEvent } from '../../infrastructure/websocket/SocketManager.js';
 import type { ContextSnapshot } from '../context-builder.js';
-import type { Graph, GraphNode } from './graph.js';
+import type { Rubric } from './evaluation.js';
+import type { AnyGraph } from './graph.js';
+import type { RunMode } from './completion.js';
 
 function runFile(projectId: string, runId: string): string {
   return join(projectRunsDir(projectId), `${runId}.jsonl`);
@@ -25,7 +27,7 @@ export interface RunMeta {
   prompt: string;
   createdAt: number;
   /** 完整 graph 快照（含 end/role/when/maxIterations/edge.id），重放时按快照配节点 label/配色/迭代。 */
-  graph: Graph;
+  graph: AnyGraph;
   /** 仅 agent 图节点 → instanceKey（input/end 无 instanceKey，故 Partial）。重放/审计用。 */
   graphNodeInstances: Partial<Record<string, string>>;
   /** Step 2: 归属 Thread + turn + 开轮时的 revision（重放/审计用；旧 run 无则缺省）。 */
@@ -34,6 +36,9 @@ export interface RunMeta {
   threadRevision?: number;
   /** Step 3: 本次注入的上下文快照（included turns/summary/pins/serverContext + 预算估算）。 */
   contextSnapshot?: ContextSnapshot;
+  runMode?: RunMode;
+  rubrics?: Record<string, { rubricRef: string; hash: string; rubric: Rubric }>;
+  gatePolicyOverrides?: Record<string, 'ask_user' | 'continue_best' | 'fail'>;
 }
 
 export interface RunSummary {
@@ -41,10 +46,32 @@ export interface RunSummary {
   projectId: string;
   prompt: string;
   createdAt: number;
-  status: 'done' | 'error' | 'aborted' | 'unknown';
+  status: 'done' | 'error' | 'aborted' | 'paused' | 'unknown';
   /** Step 2: 归属 Thread（旧 run 无则缺省）。 */
   threadId?: string;
   turnId?: string;
+}
+
+export function deriveRunStatus(events: PersistedRunEvent[]): RunSummary['status'] {
+  let status: RunSummary['status'] = 'unknown';
+  for (const event of events) {
+    if (event.type === 'branch_checkpoint' || (event.type === 'run_state' && event.phase === 'paused')) status = 'paused';
+    else if (event.type === 'run_state' && event.phase === 'resume_token_consumed') status = 'unknown';
+    else if (event.type === 'run_done') status = 'done';
+    else if (event.type === 'run_error') status = 'error';
+    else if (event.type === 'run_aborted') status = 'aborted';
+  }
+  return status;
+}
+
+/** 启动恢复专用：只返回最后 durable 状态仍为 paused 的 run_meta。 */
+export function listRecoverablePausedRuns(projectId: string): RunMeta[] {
+  const dir = projectRunsDir(projectId);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter((f) => f.endsWith('.jsonl')).flatMap((file) => {
+    const { meta, events } = readJsonl(join(dir, file));
+    return meta && deriveRunStatus(events) === 'paused' ? [meta] : [];
+  });
 }
 
 const openStreams = new Map<string, WriteStream>();
@@ -68,9 +95,12 @@ export function recordRunStart(
   projectId: string,
   runId: string,
   prompt: string,
-  graph: Graph,
+  graph: AnyGraph,
   thread?: { threadId: string; turnId: string; threadRevision: number },
   contextSnapshot?: ContextSnapshot,
+  runMode?: RunMode,
+  rubrics?: RunMeta['rubrics'],
+  gatePolicyOverrides?: RunMeta['gatePolicyOverrides'],
 ): void {
   const meta: RunMeta = {
     type: 'run_meta',
@@ -79,13 +109,14 @@ export function recordRunStart(
     prompt,
     createdAt: Date.now(),
     graph,
-    graphNodeInstances: Object.fromEntries(
-      graph.nodes
-        .filter((n): n is Extract<GraphNode, { type: 'agent' }> => n.type === 'agent' && 'agentNodeKey' in n && !!n.agentNodeKey)
-        .map((n) => [n.id, formatInstanceKey(projectId, n.agentNodeKey)] as const),
-    ),
+    graphNodeInstances: Object.fromEntries(graph.nodes.flatMap((n) =>
+      n.type === 'agent' || n.type === 'decision' ? [[n.id, formatInstanceKey(projectId, n.agentNodeKey)] as const] : [],
+    )),
     ...(thread ? { threadId: thread.threadId, turnId: thread.turnId, threadRevision: thread.threadRevision } : {}),
     ...(contextSnapshot ? { contextSnapshot } : {}),
+    ...(runMode ? { runMode } : {}),
+    ...(rubrics ? { rubrics } : {}),
+    ...(gatePolicyOverrides && Object.keys(gatePolicyOverrides).length ? { gatePolicyOverrides } : {}),
   };
   getStream(projectId, runId).write(JSON.stringify(meta) + '\n');
 }
@@ -110,14 +141,14 @@ export function closeRunStream(projectId: string, runId: string): void {
 function isRunMeta(o: unknown): o is RunMeta {
   return typeof o === 'object' && o !== null && (o as { type?: unknown }).type === 'run_meta';
 }
-function isGraphEvent(o: unknown): o is GraphEvent {
+function isPersistedRunEvent(o: unknown): o is PersistedRunEvent {
   return typeof o === 'object' && o !== null && 'type' in o && 'runId' in o;
 }
 
-function readJsonl(file: string): { meta?: RunMeta; events: GraphEvent[] } {
+function readJsonl(file: string): { meta?: RunMeta; events: PersistedRunEvent[] } {
   const content = existsSync(file) ? readFileSync(file, 'utf-8') : '';
   if (!content) return { events: [] };
-  const events: GraphEvent[] = [];
+  const events: PersistedRunEvent[] = [];
   let meta: RunMeta | undefined;
   for (const line of content.split('\n')) {
     const trimmed = line.trim();
@@ -129,13 +160,19 @@ function readJsonl(file: string): { meta?: RunMeta; events: GraphEvent[] } {
       continue; // 末行不完整容忍
     }
     if (isRunMeta(obj)) meta = obj;
-    else if (isGraphEvent(obj)) events.push(obj);
+    else if (isPersistedRunEvent(obj)) events.push(obj);
   }
   return { meta, events };
 }
 
 /** 重放某次 run：返回 meta + 事件序列。 */
 export function readRun(projectId: string, runId: string): { meta?: RunMeta; events: GraphEvent[] } {
+  const { meta, events } = readJsonl(runFile(projectId, runId));
+  return { ...(meta ? { meta } : {}), events: events.filter((e): e is GraphEvent => e.type !== 'run_state' && e.type !== 'branch_checkpoint') };
+}
+
+/** 服务端恢复专用：包含内部 checkpoint，禁止直接返回 HTTP/WS。 */
+export function readPersistedRun(projectId: string, runId: string): { meta?: RunMeta; events: PersistedRunEvent[] } {
   return readJsonl(runFile(projectId, runId));
 }
 
@@ -149,13 +186,7 @@ export function listRuns(projectId: string, limit = 20): RunSummary[] {
     const runId = f.slice(0, -'.jsonl'.length);
     const { meta, events } = readJsonl(join(dir, f));
     if (!meta) continue;
-    const last = events[events.length - 1];
-    let status: RunSummary['status'] = 'unknown';
-    if (last) {
-      if (last.type === 'run_done') status = 'done';
-      else if (last.type === 'run_error') status = 'error';
-      else if (last.type === 'run_aborted') status = 'aborted';
-    }
+    const status = deriveRunStatus(events);
     summaries.push({
       runId: meta.runId,
       projectId: meta.projectId,

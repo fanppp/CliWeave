@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 4,
+  "localId": "verifier",
+  "name": "Claude 验证工程师",
+  "provider": "claude",
+  "cli": { "command": "claude", "sandboxMode": "danger-full-access", "extraArgs": [], "promptVia": "stdin", "cwd": "${PROJECT_PATH}" },
+  "storage": {
+    "config": { "identityFile": "config/identity.md", "rulesFiles": ["config/rules/*.md"] },
+    "runtime": { "activeSessionFile": "runtime/active-session.json", "resume": true },
+    "data": { "cliHome": "data/cli/.claude" }
+  }
+}

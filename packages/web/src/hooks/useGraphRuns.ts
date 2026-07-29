@@ -9,7 +9,7 @@ export interface RunSummary {
   runId: string;
   prompt: string;
   createdAt: number;
-  status: 'done' | 'error' | 'aborted' | 'unknown';
+  status: 'done' | 'error' | 'aborted' | 'paused' | 'unknown';
 }
 interface RunMeta {
   type: 'run_meta';

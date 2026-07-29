@@ -17,9 +17,12 @@ import { withNodeLock } from '../node-mutex.js';
 import { invokeAgentWithPolicy } from '../invoke-agent.js';
 import type { SessionPolicy, NodeOutcome } from '../session-policy.js';
 import type { AgentMessage } from '../types.js';
-import { computeBackEdges, DEFAULT_BACK_EDGE_MAX_ITER, type Graph, type GraphAgentNode, type GraphEdge } from './graph.js';
+import { computeBackEdges, DEFAULT_BACK_EDGE_MAX_ITER, type AnyGraph, type AnyGraphAgentNode, type ExhaustedPolicy, type Graph, type GraphAgentNode, type GraphEdge } from './graph.js';
 import { extractVerdict, type TrailEntry, type Verdict, type VerdictContext } from './verdict.js';
+import { AUTO_ROUTE_INSTRUCTION, extractCompletion, type RunMode } from './completion.js';
 import type { PublicGraphEvent, PersistedRunEvent } from '../../infrastructure/websocket/SocketManager.js';
+import { walkEvaluatorOptimizerGraph } from './EvaluatorOptimizerRouter.js';
+import type { Rubric } from './evaluation.js';
 
 export interface ExecuteOptions {
   runId: string;
@@ -31,6 +34,11 @@ export interface ExecuteOptions {
   signal?: AbortSignal;
   /** Step 3: Thread 跨轮上下文前缀（serverContext+summary+历史 turns+pins），由 /run/start 一次构造、注入每个节点 prompt。 */
   contextPrefix?: string;
+  /** auto 仅允许每个首层分支的第一个 work 节点决定提前结束；缺省 full 保持旧客户端行为。 */
+  runMode?: RunMode;
+  gatePolicyOverrides?: Record<string, ExhaustedPolicy>;
+  /** V4 run_meta 中冻结的 rubric 快照。运行和恢复都必须使用它，禁止中途重读可变文件。 */
+  rubrics?: Record<string, { rubricRef: string; hash: string; rubric: Rubric }>;
 }
 
 /** 节点执行上下文（第 4 参，测试 wrapper 必须透传，不依赖少参数赋值）。 */
@@ -39,14 +47,14 @@ export interface NodeExecContext {
   sessionPolicy: SessionPolicy;
 }
 
-export type ExecNode = (node: GraphAgentNode, prompt: string, opts: ExecuteOptions, context: NodeExecContext) => Promise<NodeOutcome>;
+export type ExecNode = (node: AnyGraphAgentNode, prompt: string, opts: ExecuteOptions, context: NodeExecContext) => Promise<NodeOutcome>;
 
 function ts(): number {
   return Date.now();
 }
 
 /** 真实执行单个 agent 节点（画布实例隔离）。图运行收 fresh/resume，永不传 active → 不触碰 active-session.json。 */
-export async function runAgentNode(node: GraphAgentNode, nodePrompt: string, opts: ExecuteOptions, context: NodeExecContext): Promise<NodeOutcome> {
+export async function runAgentNode(node: AnyGraphAgentNode, nodePrompt: string, opts: ExecuteOptions, context: NodeExecContext): Promise<NodeOutcome> {
   const { runId, projectId, emit, record, signal } = opts;
   const { iteration, sessionPolicy } = context;
   const instanceKey = formatInstanceKey(projectId, node.agentNodeKey);
@@ -175,6 +183,8 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
 
   type BranchResult =
     | { status: 'completed'; output: string }
+    | { status: 'early_complete'; output: string }
+    | { status: 'needs_input'; output: string; reason: string }
     | { status: 'best_effort'; output: string; reason?: string }
     | { status: 'global_limit'; output: string }
     | { status: 'aborted' }
@@ -186,6 +196,7 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
    * producer 产出后清 review metadata（gap4）；bestEffortUsed 跟随分支，下游成功不抹掉 best-effort 事实（gap1）。
    */
   async function walkBranch(startEdge: GraphEdge, branchPrompt: string): Promise<BranchResult> {
+    const branchId = startEdge.id;
     let inEdge: GraphEdge | null = startEdge;
     let nodeId = startEdge.target;
     let carriedArtifact = branchPrompt;
@@ -198,6 +209,7 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
     let bestEffortReason = '';
     // producer nodeId → sessionId（branch 内，run-scoped）：rework(回边回到 producer) resume 该 session
     const producerSessions = new Map<string, string>();
+    let firstProducerSeen = false;
 
     /** 分支终态：bestEffortUsed 时标 best_effort（保留降级事实），否则 completed。 */
     const finalize = (output: string): BranchResult => ({
@@ -243,7 +255,10 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
       const backs = outs.filter((e) => isBack(e));
       const isDecision = backs.length > 0;
 
-      const curPrompt = (opts.contextPrefix ?? '') + buildLegacyPrompt(node, prompt, upstreamArtifacts, lastProducerNodeId, latestReview, isDecision);
+      const shouldRoute = (opts.runMode ?? 'full') === 'auto' && !firstProducerSeen && !isDecision;
+      const curPrompt = (opts.contextPrefix ?? '')
+        + buildLegacyPrompt(node, prompt, upstreamArtifacts, lastProducerNodeId, latestReview, isDecision)
+        + (shouldRoute ? AUTO_ROUTE_INSTRUCTION : '');
       // 会话策略：rework(回边回到 producer) resume 该 producer 的 session；其余 fresh。图运行永不传 active。
       const sessionPolicy: SessionPolicy =
         arrivedViaBack && producerSessions.has(nodeId)
@@ -252,7 +267,34 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
       const outcome = await exec(node, curPrompt, opts, { iteration: iter, sessionPolicy });
       if (outcome.status === 'aborted') return { status: 'aborted' };
       if (outcome.status === 'error') return { status: 'error', error: outcome.error ?? `node '${nodeId}' failed` };
-      const finalText = outcome.finalText ?? '';
+      let finalText = outcome.finalText ?? '';
+
+      // Auto 只信任首个 producer 的行锚定控制块。控制块从 artifact 中移除，永不传给下游。
+      if (shouldRoute) {
+        firstProducerSeen = true;
+        const routed = extractCompletion(finalText);
+        finalText = routed.artifact;
+        const routeEvent = {
+          type: 'route_decided', runId, branchId, nodeId,
+          claim: routed.claim, decision: routed.decision, reason: routed.reason, timestamp: ts(),
+        } as const;
+        emit(routeEvent);
+        record?.(routeEvent);
+        if (routed.decision === 'finish') {
+          const doneEvent = { type: 'branch_done', runId, branchId, cause: 'early_complete', finalArtifact: finalText, timestamp: ts() } as const;
+          emit(doneEvent);
+          record?.(doneEvent);
+          return { status: 'early_complete', output: finalText };
+        }
+        if (routed.decision === 'clarify') {
+          const doneEvent = { type: 'branch_done', runId, branchId, cause: 'needs_input', finalArtifact: finalText, timestamp: ts() } as const;
+          emit(doneEvent);
+          record?.(doneEvent);
+          return { status: 'needs_input', output: finalText, reason: routed.reason };
+        }
+      } else if (!isDecision) {
+        firstProducerSeen = true;
+      }
 
       const vctx: VerdictContext = { runId, nodeId, iteration: iter, finalText, trail };
       const verdict: Verdict | null = isDecision ? extractVerdict(node, vctx) : null;
@@ -349,11 +391,18 @@ export async function walkGraph(prompt: string, graph: Graph, opts: ExecuteOptio
   const beRes = results.find((r): r is Extract<BranchResult, { status: 'best_effort' }> => r.status === 'best_effort');
   if (beRes) {
     finish({ type: 'run_done', runId, finalText, termination: 'best_effort', reason: beRes.reason });
+  } else if (results.some((r) => r.status === 'needs_input')) {
+    const blocked = results.find((r): r is Extract<BranchResult, { status: 'needs_input' }> => r.status === 'needs_input');
+    finish({ type: 'run_done', runId, finalText, termination: 'needs_input', reason: blocked?.reason ?? 'missing required input' });
+  } else if (results.every((r) => r.status === 'early_complete')) {
+    finish({ type: 'run_done', runId, finalText, termination: 'early_complete' });
   } else {
     finish({ type: 'run_done', runId, finalText, termination: 'completed' });
   }
 }
 
-export async function executeGraph(prompt: string, graph: Graph, opts: ExecuteOptions): Promise<void> {
-  return walkGraph(prompt, graph, opts, runAgentNode);
+export async function executeGraph(prompt: string, graph: AnyGraph, opts: ExecuteOptions): Promise<void> {
+  return graph.schemaVersion === 4
+    ? walkEvaluatorOptimizerGraph(prompt, graph, opts, runAgentNode)
+    : walkGraph(prompt, graph, opts, runAgentNode);
 }

@@ -8,6 +8,7 @@ import {
   type Graph,
   type GraphEdge,
   GraphValidationError,
+  type GraphV4,
 } from './graph.js';
 
 function agent(id: string, key: string): Graph['nodes'][number] {
@@ -117,5 +118,57 @@ describe('v1/v2 归一化', () => {
     const parsed = GraphV3Schema.parse(v3);
     assert.equal(parsed.edges[0].maxIterations, undefined);
     void v2;
+  });
+});
+
+function v4Graph(): GraphV4 {
+  return {
+    schemaVersion: 4, inputNode: '__input__', endNode: '__end__', maxNodeExecutions: 50,
+    nodes: [
+      { id: '__input__', type: 'input' },
+      { id: 'work', type: 'agent', agentNodeKey: 'opencode:worker' },
+      { id: 'review1', type: 'decision', agentNodeKey: 'codex:review1', rubricRef: 'rubric.json' },
+      { id: 'review2', type: 'decision', agentNodeKey: 'claude:review2', rubricRef: 'rubric.json' },
+      { id: '__end__', type: 'end' },
+    ],
+    edges: [
+      { id: 'entry:stable', source: '__input__', target: 'work', kind: 'forward' },
+      { id: 'finish:stable', source: 'work', target: '__end__', kind: 'forward' },
+      { id: 'gate:one', source: 'work', target: 'review1', kind: 'gate', order: 1, maxRevisions: 2, onExhausted: 'continue_best', onBlocked: 'fail' },
+      { id: 'rework:one', source: 'review1', target: 'work', kind: 'rework' },
+      { id: 'gate:two', source: 'work', target: 'review2', kind: 'gate', order: 2, maxRevisions: 1, onExhausted: 'continue_best', onBlocked: 'fail' },
+      { id: 'rework:two', source: 'review2', target: 'work', kind: 'rework' },
+    ],
+  };
+}
+
+describe('V4 Evaluator-Optimizer topology', () => {
+  it('accepts ordered gates and preserves edge ids containing colons', () => {
+    const g = v4Graph();
+    validateGraph(g); validateRunnable(g);
+    assert.equal(g.edges[0].id, 'entry:stable');
+  });
+
+  it('rejects duplicate and non-contiguous gate order', () => {
+    const duplicate = v4Graph();
+    (duplicate.edges.find((e) => e.id === 'gate:two') as { order: number }).order = 1;
+    assert.throws(() => validateGraph(duplicate), /duplicate gate order/);
+    const gap = v4Graph();
+    (gap.edges.find((e) => e.id === 'gate:two') as { order: number }).order = 3;
+    assert.throws(() => validateGraph(gap), /contiguous/);
+  });
+
+  it('rejects a decision reworking a different work node', () => {
+    const g = v4Graph();
+    g.nodes.splice(2, 0, { id: 'other', type: 'agent', agentNodeKey: 'opencode:other' });
+    (g.edges.find((e) => e.id === 'rework:one') as { target: string }).target = 'other';
+    assert.throws(() => validateGraph(g), /must rework its gated work/);
+  });
+
+  it('temporarily rejects multiple V4 input branches until multi-branch resume aggregation is implemented', () => {
+    const g = v4Graph();
+    g.nodes.splice(2, 0, { id: 'other', type: 'agent', agentNodeKey: 'opencode:other' });
+    g.edges.push({ id: 'entry-other', source: '__input__', target: 'other', kind: 'forward' });
+    assert.throws(() => validateRunnable(g), /exactly one input forward branch/);
   });
 });

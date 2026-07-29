@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "name": "Independent Verification",
+  "criteria": [
+    { "id": "build", "description": "适用的构建和类型检查真实通过", "required": true, "weight": 4 },
+    { "id": "tests", "description": "相关自动化测试真实通过", "required": true, "weight": 5 },
+    { "id": "runtime", "description": "关键用户流程或运行时行为有证据", "required": true, "weight": 5 },
+    { "id": "integrity", "description": "验证过程未修改实现且结果可复现", "required": true, "weight": 4 }
+  ]
+}

@@ -4,6 +4,7 @@ import type { CSSProperties } from 'react';
 import { useGraphRunStore } from '../stores/graphRunStore';
 import { GraphRunSocketBridge } from './GraphRunSocketBridge';
 import { useSocketConnection } from '../providers/SocketProvider';
+import { ThreadPicker } from './ThreadPicker';
 
 /**
  * 图运行状态条（功能2：输入已移到画布输入节点）。
@@ -15,12 +16,16 @@ export function GraphRunPanel() {
   const status = useGraphRunStore((s) => s.status);
   const activeNodeIds = useGraphRunStore((s) => s.activeNodeIds);
   const abortRun = useGraphRunStore((s) => s.abortRun);
-  const busy = status === 'running';
+  const paused = useGraphRunStore((s) => s.paused);
+  const resumeRun = useGraphRunStore((s) => s.resumeRun);
+  const busy = status === 'starting' || status === 'running';
 
   const statusText = !connected
     ? 'WebSocket 断开'
     : busy
-      ? `运行中（执行中节点：${activeNodeIds.length || 0}）`
+      ? status === 'starting' ? '正在启动' : `运行中（执行中节点：${activeNodeIds.length || 0}）`
+      : status === 'paused'
+        ? `已暂停（${paused?.gateId ?? '质量 Gate'}）`
       : status === 'done'
         ? '运行完成'
         : status === 'error'
@@ -30,13 +35,21 @@ export function GraphRunPanel() {
   return (
     <div style={styles.bar}>
       <GraphRunSocketBridge />
+      <ThreadPicker />
       <div style={{ ...styles.state, color: busy ? 'var(--text-muted)' : connected ? 'var(--success)' : 'var(--danger)' }}>
         <span style={{ ...styles.dot, background: busy ? 'var(--accent)' : connected ? 'var(--success)' : 'var(--danger)' }} />
         {statusText}
       </div>
-      {busy && (
+      {status === 'paused' && paused && (
+        <div style={styles.pauseActions}>
+          <button style={styles.secondaryBtn} onClick={() => void resumeRun('continue_best')}>放行最佳版本</button>
+          <button style={styles.secondaryBtn} onClick={() => void resumeRun('revise_once')}>再修订一次</button>
+          <button style={{ ...styles.btn, ...styles.stopBtn }} onClick={() => void resumeRun('fail')}>失败结束</button>
+        </div>
+      )}
+      {(busy || status === 'paused') && (
         <button onClick={() => void abortRun()} style={{ ...styles.btn, ...styles.stopBtn }}>
-          停止
+          中止
         </button>
       )}
     </div>
@@ -44,9 +57,11 @@ export function GraphRunPanel() {
 }
 
 const styles: Record<string, CSSProperties> = {
-  bar: { padding: '8px 12px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 },
+  bar: { padding: '8px 12px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
   state: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, flex: 1 },
   dot: { width: 7, height: 7, borderRadius: '50%', flexShrink: 0 },
   btn: { background: 'var(--danger)', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 12px', fontSize: 12, cursor: 'pointer' },
   stopBtn: {},
+  pauseActions: { display: 'flex', alignItems: 'center', gap: 6 },
+  secondaryBtn: { background: 'var(--surface-raised)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 4, padding: '4px 8px', fontSize: 11, cursor: 'pointer' },
 };

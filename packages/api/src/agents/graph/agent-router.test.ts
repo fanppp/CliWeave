@@ -91,6 +91,84 @@ function region(prompt: string, name: string): string {
 }
 
 describe('walkGraph V3 legacy runner', () => {
+  it('Auto: safe FINISH executes only the first producer and returns a clean artifact', async () => {
+    const calls: string[] = [];
+    const exec: ExecNode = async (node) => {
+      calls.push(node.id);
+      return { status: 'ok', finalText: node.id === 'A'
+        ? '2\nROUTE: FINISH\nROUTE_CATEGORY: simple_answer\nROUTE_REASON: arithmetic answered'
+        : 'should-not-run' };
+    };
+    const events: GraphEvent[] = [];
+    await walkGraph('1+1=?', makeGraph(1), { runId: 'auto', projectId: 'default', runMode: 'auto', emit: (e) => events.push(e) }, exec);
+    assert.deepEqual(calls, ['A']);
+    const done = terminal(events) as Extract<GraphEvent, { type: 'run_done' }>;
+    assert.equal(done.termination, 'early_complete');
+    assert.equal(done.finalText, '2');
+    assert.equal(events.filter((e) => e.type === 'route_decided').length, 1);
+  });
+
+  it('Full ignores route claims and follows the complete graph', async () => {
+    const calls: string[] = [];
+    const exec: ExecNode = async (node) => {
+      calls.push(node.id);
+      return { status: 'ok', finalText: node.id === 'B' ? 'VERDICT: APPROVE' : '2' };
+    };
+    const events: GraphEvent[] = [];
+    await walkGraph('1+1=?', makeGraph(1), { runId: 'full', projectId: 'default', runMode: 'full', emit: (e) => events.push(e) }, exec);
+    assert.deepEqual(calls, ['A', 'B']);
+    assert.equal((terminal(events) as Extract<GraphEvent, { type: 'run_done' }>).termination, 'completed');
+    assert.equal(events.some((e) => e.type === 'route_decided'), false);
+  });
+
+  it('Auto forces an unsafe FINISH claim forward', async () => {
+    const calls: string[] = [];
+    const exec: ExecNode = async (node) => {
+      calls.push(node.id);
+      return { status: 'ok', finalText: node.id === 'A'
+        ? 'task\nROUTE: FINISH\nROUTE_CATEGORY: change\nROUTE_REASON: incorrectly finished'
+        : 'VERDICT: APPROVE' };
+    };
+    const events: GraphEvent[] = [];
+    await walkGraph('change code', makeGraph(1), { runId: 'unsafe', projectId: 'default', runMode: 'auto', emit: (e) => events.push(e) }, exec);
+    assert.deepEqual(calls, ['A', 'B']);
+    assert.equal((terminal(events) as Extract<GraphEvent, { type: 'run_done' }>).termination, 'completed');
+  });
+
+  it('Auto is branch-local: one early branch does not cancel a continuing branch', async () => {
+    const graph: Graph = {
+      schemaVersion: 3, inputNode: '__input__', endNode: '__end__', maxNodeExecutions: 50,
+      nodes: [
+        { id: '__input__', type: 'input' },
+        { id: 'A1', type: 'agent', agentNodeKey: 'codex:a1' },
+        { id: 'A2', type: 'agent', agentNodeKey: 'codex:a2' },
+        { id: 'C', type: 'agent', agentNodeKey: 'codex:c' },
+        { id: '__end__', type: 'end' },
+      ],
+      edges: [
+        { id: 'branch-1', source: '__input__', target: 'A1' },
+        { id: 'branch-2', source: '__input__', target: 'A2' },
+        { id: 'a1-end', source: 'A1', target: '__end__' },
+        { id: 'a2-c', source: 'A2', target: 'C' },
+        { id: 'c-end', source: 'C', target: '__end__' },
+      ],
+    };
+    const calls: string[] = [];
+    const exec: ExecNode = async (node) => {
+      calls.push(node.id);
+      const finalText = node.id === 'A1'
+        ? 'short\nROUTE: FINISH\nROUTE_CATEGORY: simple_answer\nROUTE_REASON: done'
+        : node.id === 'A2'
+          ? 'plan\nROUTE: FORWARD\nROUTE_CATEGORY: complex\nROUTE_REASON: continue'
+          : 'completed work';
+      return { status: 'ok', finalText };
+    };
+    const events: GraphEvent[] = [];
+    await walkGraph('mixed', graph, { runId: 'fanout', projectId: 'default', runMode: 'auto', emit: (e) => events.push(e) }, exec);
+    assert.deepEqual(calls.sort(), ['A1', 'A2', 'C']);
+    assert.equal((terminal(events) as Extract<GraphEvent, { type: 'run_done' }>).termination, 'completed');
+  });
+
   it('满意 → run_done completed', async () => {
     const ev = await runWalkAsync(makeGraph(3), makeExec(['1'], ['APPROVE']));
     const t = terminal(ev) as { type: string; termination: string };

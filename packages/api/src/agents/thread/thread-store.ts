@@ -65,6 +65,8 @@ export interface PendingRun {
   prompt: string;
   /** 开轮后的 thread.revision（run_meta 快照 + start 重试校验用）。 */
   threadRevision: number;
+  runMode: 'auto' | 'full' | 'quick';
+  gatePolicyOverrides?: Record<string, 'ask_user' | 'continue_best' | 'fail'>;
   createdAt: number;
 }
 
@@ -249,11 +251,11 @@ export function completeTurn(
   runId: string,
   turnId: string,
   result: { finalArtifact: string; quality?: { status: string; termination: string; reason?: string } },
-): Promise<void> {
+): Promise<ThreadMeta | null> {
   return withNodeLock(`thread:${projectId}:${threadId}`, async () => {
     const meta = readThread(projectId, threadId);
-    if (!meta) return;
-    if (meta.activeRunId !== runId) return; // 过期回调（run 已被 abort/替换）
+    if (!meta) return null;
+    if (meta.activeRunId !== runId) return null; // 过期回调（run 已被 abort/替换）
     const now = Date.now();
     appendThreadEvent(projectId, threadId, {
       type: 'turn_completed',
@@ -263,7 +265,9 @@ export function completeTurn(
       ...(result.quality ? { quality: result.quality } : {}),
       completedAt: now,
     });
-    writeThreadMeta(projectId, { ...meta, revision: meta.revision + 1, activeRunId: null, updatedAt: now });
+    const updated = { ...meta, revision: meta.revision + 1, activeRunId: null, updatedAt: now };
+    writeThreadMeta(projectId, updated);
+    return updated;
   });
 }
 
@@ -274,11 +278,11 @@ export function failTurn(
   runId: string,
   turnId: string,
   result: { status: 'error' | 'aborted'; reason?: string },
-): Promise<void> {
+): Promise<ThreadMeta | null> {
   return withNodeLock(`thread:${projectId}:${threadId}`, async () => {
     const meta = readThread(projectId, threadId);
-    if (!meta) return;
-    if (meta.activeRunId !== runId) return;
+    if (!meta) return null;
+    if (meta.activeRunId !== runId) return null;
     const now = Date.now();
     appendThreadEvent(projectId, threadId, {
       type: 'turn_failed',
@@ -288,7 +292,9 @@ export function failTurn(
       ...(result.reason ? { reason: result.reason } : {}),
       completedAt: now,
     });
-    writeThreadMeta(projectId, { ...meta, revision: meta.revision + 1, activeRunId: null, updatedAt: now });
+    const updated = { ...meta, revision: meta.revision + 1, activeRunId: null, updatedAt: now };
+    writeThreadMeta(projectId, updated);
+    return updated;
   });
 }
 
