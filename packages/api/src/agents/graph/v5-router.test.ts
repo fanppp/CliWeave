@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { walkV5Graph, resumeV5Graph } from './V5Router.js';
-import { parseDurableCheckpoint, isV5GateCheckpoint, type V5GateCheckpoint } from './checkpoint.js';
+import { walkV5Graph, resumeV5Graph, resumeV5Clarify } from './V5Router.js';
+import { parseDurableCheckpoint, isV5GateCheckpoint, type V5GateCheckpoint, type V5ClarifyCheckpoint } from './checkpoint.js';
 import { getDefaultV5ProjectGraph } from './v5-workspace.js';
 import type { ExecNode, ExecuteOptions } from './AgentRouter.js';
 import type { GraphV5 } from './graph.js';
@@ -89,12 +89,13 @@ describe('V5 Router + Coordinator runner', () => {
     assert.equal(scripted.calls.some((c) => c.nodeId === 'code-review'), false);
   });
 
-  it('clarify lane ends as needs_input', async () => {
+  it('clarify lane pauses as pauseKind:clarify (durable, not terminal)', async () => {
     const scripted = v5Exec([decision('clarify', { missingRequirements: ['need repo path'] })]);
     const { publicEvents } = await run(v5Graph(), scripted.exec);
-    const done = publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_done' }> => e.type === 'run_done');
-    assert.equal(done?.termination, 'needs_input');
-    assert.ok(done?.finalText?.includes('need repo path'));
+    const paused = publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_paused'; pauseKind: 'clarify' }> => e.type === 'run_paused' && e.pauseKind === 'clarify');
+    assert.ok(paused);
+    assert.deepEqual(paused?.missingRequirements, ['need repo path']);
+    assert.equal(publicEvents.some((e) => e.type === 'run_done'), false); // paused, 未 done
     assert.equal(publicEvents.some((e) => e.type === 'run_plan_created'), false);
   });
 
@@ -133,9 +134,9 @@ describe('V5 Router + Coordinator runner', () => {
     const { publicEvents } = await run(v5Graph(), wrapped);
     // investigator 被调用（兜底调研）
     assert.ok(scripted.calls.some((c) => c.nodeId === 'investigator'));
-    // reroute 失败 → clarify → needs_input，不发 run_plan_created
-    const done = publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_done' }> => e.type === 'run_done');
-    assert.equal(done?.termination, 'needs_input');
+    // reroute 失败 → clarify → durable pause（不发 run_plan_created，不发 run_done）
+    const paused = publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_paused'; pauseKind: 'clarify' }> => e.type === 'run_paused' && e.pauseKind === 'clarify');
+    assert.ok(paused);
     assert.equal(publicEvents.some((e) => e.type === 'run_plan_created'), false);
   });
 });
@@ -242,5 +243,57 @@ describe('V5 durable gate pause/resume', () => {
     assert.ok(scripted2.calls.some((c) => c.nodeId === 'implementer')); // work 被重新调用
     const done = ev.publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_done' }> => e.type === 'run_done');
     assert.equal(done?.termination, 'completed'); // approve → completed
+  });
+});
+
+describe('V5 durable clarify pause/resume', () => {
+  function clarifyCpOf(persisted: PersistedRunEvent[]): V5ClarifyCheckpoint | undefined {
+    const cp = [...persisted].reverse().find((e) => e.type === 'branch_checkpoint');
+    return cp && cp.type === 'branch_checkpoint' ? parseDurableCheckpoint(cp.payload) as V5ClarifyCheckpoint : undefined;
+  }
+  function resumeOpts2(events: { publicEvents: PublicGraphEvent[]; persisted: PersistedRunEvent[] }): ExecuteOptions {
+    const rubrics = Object.fromEntries(v5Graph().nodes.filter((n) => n.type === 'decision').map((n) => [n.id, { rubricRef: n.rubricRef!, hash: 'test', rubric }] as const));
+    return { runId: 'run-v5', projectId: 'test-project', emit: (e) => events.publicEvents.push(e), record: (e) => events.persisted.push(e), rubrics };
+  }
+
+  it('clarify resume with userResponse re-routes to a lane and completes', async () => {
+    const scripted = v5Exec([decision('clarify', { missingRequirements: ['need path'] })]);
+    const { persisted } = await run(v5Graph(), scripted.exec);
+    const cp = clarifyCpOf(persisted)!;
+    assert.equal(cp.clarificationAttempts, 0);
+    // resume：Router 补充信息后改判 direct_answer → responder → end
+    const scripted2 = v5Exec([decision('direct_answer', { confidence: 0.9 })]);
+    const ev: { publicEvents: PublicGraphEvent[]; persisted: PersistedRunEvent[] } = { publicEvents: [], persisted: [] };
+    await resumeV5Clarify('implement feature', v5Graph(), resumeOpts2(ev), cp, 'the path is /repo', scripted2.exec);
+    const done = ev.publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_done' }> => e.type === 'run_done');
+    assert.equal(done?.termination, 'completed');
+    assert.equal(done?.finalText, 'responder-artifact');
+  });
+
+  it('clarify resume still clarify → pauses again (attempts=1); 2nd still clarify → run_error (max 2)', async () => {
+    // 初始 clarify(attempts=0)
+    const scripted = v5Exec([decision('clarify', { missingRequirements: ['x'] })]);
+    const { persisted } = await run(v5Graph(), scripted.exec);
+    const cp0 = clarifyCpOf(persisted)!;
+    // 第一次 resume：Router 仍 clarify → 暂停(attempts=1)
+    const scripted2 = v5Exec([decision('clarify', { missingRequirements: ['y'] })]);
+    const ev1: { publicEvents: PublicGraphEvent[]; persisted: PersistedRunEvent[] } = { publicEvents: [], persisted: [] };
+    await resumeV5Clarify('implement feature', v5Graph(), resumeOpts2(ev1), cp0, 'partial', scripted2.exec);
+    const cp1 = clarifyCpOf(ev1.persisted)!;
+    assert.equal(cp1.clarificationAttempts, 1);
+    assert.ok(ev1.publicEvents.some((e) => e.type === 'run_paused' && e.pauseKind === 'clarify'));
+    // 第二次 resume：Router 仍 clarify → attempts=2 → run_error
+    const scripted3 = v5Exec([decision('clarify', { missingRequirements: ['z'] })]);
+    const ev2: { publicEvents: PublicGraphEvent[]; persisted: PersistedRunEvent[] } = { publicEvents: [], persisted: [] };
+    await resumeV5Clarify('implement feature', v5Graph(), resumeOpts2(ev2), cp1, 'more', scripted3.exec);
+    assert.ok(ev2.publicEvents.some((e) => e.type === 'run_error'));
+  });
+
+  it('unsupported lane stays terminal needs_input (not durable pause)', async () => {
+    const scripted = v5Exec([decision('unsupported', { reason: 'out of scope' })]);
+    const { publicEvents } = await run(v5Graph(), scripted.exec);
+    assert.equal(publicEvents.some((e) => e.type === 'run_paused'), false);
+    const done = publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_done' }> => e.type === 'run_done');
+    assert.equal(done?.termination, 'needs_input');
   });
 });

@@ -22,13 +22,13 @@ import type { PublicGraphEvent, RunQuality } from '../../infrastructure/websocke
 import { routerPrompt, parseRouteDecision, validateRouteDecision, resolveLanePlan, type IntentMode, type RouteDecision, type RunPlan } from './routing.js';
 import { evaluatorPrompt, extractEvaluation, readDecisionRubric, revisionPrompt, selectBest, type Candidate, type Evaluation } from './evaluation.js';
 import type { ExhaustedPolicy } from './graph.js';
-import { hashToken, TOKEN_TTL_MS, type V5GateCheckpoint, type ResumeAction } from './checkpoint.js';
+import { hashToken, TOKEN_TTL_MS, type V5GateCheckpoint, type V5ClarifyCheckpoint, type ResumeAction } from './checkpoint.js';
 
 const LOW_CONFIDENCE = 0.5;
 
 type LaneResult = { status: 'completed' | 'best_effort'; output: string; termination?: 'completed' | 'best_effort'; quality: RunQuality } | { status: 'error'; error: string } | { status: 'aborted' } | { status: 'paused' };
 
-export async function walkV5Graph(prompt: string, graph: GraphV5, opts: ExecuteOptions, exec: ExecNode, intentMode: IntentMode, resume?: { checkpoint: V5GateCheckpoint; action: ResumeAction }): Promise<void> {
+export async function walkV5Graph(prompt: string, graph: GraphV5, opts: ExecuteOptions, exec: ExecNode, intentMode: IntentMode, resume?: { checkpoint: V5GateCheckpoint; action: ResumeAction }, clarifyResume?: { checkpoint: V5ClarifyCheckpoint; userResponse: string }): Promise<void> {
   const { runId, projectId, emit, record, signal } = opts;
   const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
   let totalExec = 0;
@@ -43,9 +43,20 @@ export async function walkV5Graph(prompt: string, graph: GraphV5, opts: ExecuteO
     return exec(node as Parameters<ExecNode>[0], (opts.contextPrefix ?? '') + nodePrompt, opts, { iteration, sessionPolicy: policy });
   };
 
+  // durable clarify pause：Router 判定 clarify（缺关键信息）→ 落盘 V5ClarifyCheckpoint + run_state paused，
+  // emit run_paused(pauseKind:'clarify')，token 只经 WS。resume 补充文本后同 run 重跑 Router。
+  function pauseClarify(rd: RouteDecision, originalPrompt: string, clarificationAttempts: number): void {
+    const token = randomBytes(32).toString('base64url');
+    const expiresAt = Date.now() + TOKEN_TTL_MS;
+    const payload: V5ClarifyCheckpoint = { runner: 'v5', kind: 'clarify', schemaVersion: 1, branchId: 'main', routeDecision: rd, originalPrompt, clarificationAttempts, tokenHash: hashToken(token), expiresAt };
+    record?.({ type: 'branch_checkpoint', runId, branchId: 'main', payload });
+    record?.({ type: 'run_state', runId, phase: 'paused', payload: { branchId: 'main', status: 'paused', pauseKind: 'clarify', missingRequirements: rd.missingRequirements } });
+    emit({ type: 'run_paused', runId, projectId, branchId: 'main', pauseKind: 'clarify', question: rd.missingRequirements.length ? rd.missingRequirements.join('; ') : rd.reason, missingRequirements: rd.missingRequirements, resumeToken: token, expiresAt });
+  }
+
   const input = byId.get(graph.inputNode);
   if (!input || input.type !== 'input') { finish({ type: 'run_error', runId, error: 'invalid V5 input node' }); return; }
-  if (!resume) {
+  if (!resume && !clarifyResume) {
     emitBoth({ type: 'node_started', runId, nodeId: input.id });
     emitBoth({ type: 'node_message', runId, nodeId: input.id, message: { type: 'text', nodeId: input.id, content: prompt, timestamp: Date.now() } as AgentMessage });
     emitBoth({ type: 'node_done', runId, nodeId: input.id });
@@ -56,6 +67,37 @@ export async function walkV5Graph(prompt: string, graph: GraphV5, opts: ExecuteO
     const result = await walkLane(graph, resume.checkpoint.plan, prompt, opts, exec, invoke, byId, signal, resume);
     if (result.status === 'aborted') { finish({ type: 'run_aborted', runId }); return; }
     if (result.status === 'paused') return; // pause 已 emit run_paused
+    if (result.status === 'error') { finish({ type: 'run_error', runId, error: result.error }); return; }
+    finish({ type: 'run_done', runId, finalText: result.output, termination: result.termination ?? 'completed', quality: result.quality });
+    return;
+  }
+
+  // clarify-resume：跳过 input/初始 Router/Investigator，用补充文本重跑 Router（同 run 同 turn），最多 2 次，再不足 → run_error。
+  if (clarifyResume) {
+    const cp = clarifyResume.checkpoint;
+    const attempts = cp.clarificationAttempts + 1;
+    const routerNode = graph.nodes.find((n) => n.type === 'router');
+    if (!routerNode || routerNode.type !== 'router') { finish({ type: 'run_error', runId, error: 'V5 graph has no router node' }); return; }
+    const clarifiedPrompt = `${cp.originalPrompt}\n\n【用户补充】\n${clarifyResume.userResponse}`;
+    const out = await invoke(routerNode, routerPrompt(clarifiedPrompt, '', opts.contextPrefix ?? '', ''), 1, { mode: 'fresh', persistActive: false });
+    if (out.status === 'aborted') { finish({ type: 'run_aborted', runId }); return; }
+    let rd: RouteDecision | null = null;
+    if (out.status === 'ok') { try { rd = parseRouteDecision(out.finalText ?? ''); } catch { /* malformed */ } }
+    if (!rd) rd = { ...cp.routeDecision, reason: `router returned malformed output on clarify resume (attempt ${attempts})` };
+    if (rd.lane === 'clarify' || rd.lane === 'unsupported') {
+      if (attempts >= 2) { finish({ type: 'run_error', runId, error: `clarification exhausted after ${attempts} attempts` }); return; }
+      pauseClarify(rd.lane === 'clarify' ? rd : { ...rd, lane: 'clarify' }, cp.originalPrompt, attempts);
+      return;
+    }
+    // 非 clarify：信任补充后的新决策，resolveLanePlan + walkLane（跳过 validate/investigate，已于暂停前完成）。
+    let plan: RunPlan;
+    try { plan = resolveLanePlan(graph, rd, false); }
+    catch (e) { finish({ type: 'run_error', runId, error: (e as Error).message }); return; }
+    emitBoth({ type: 'run_plan_created', runId, lane: plan.lane, entryNodeId: plan.entryNodeId, gateNodeIds: plan.gateNodeIds, rerouted: false, confidence: rd.confidence, risk: rd.risk, reason: rd.reason, timestamp: Date.now() });
+    emitBoth({ type: 'route_decided', runId, branchId: 'main', nodeId: routerNode.id, claim: null, decision: 'forward', reason: `lane=${plan.lane}; ${rd.reason}`, timestamp: Date.now() });
+    const result = await walkLane(graph, plan, prompt, opts, exec, invoke, byId, signal);
+    if (result.status === 'aborted') { finish({ type: 'run_aborted', runId }); return; }
+    if (result.status === 'paused') return;
     if (result.status === 'error') { finish({ type: 'run_error', runId, error: result.error }); return; }
     finish({ type: 'run_done', runId, finalText: result.output, termination: result.termination ?? 'completed', quality: result.quality });
     return;
@@ -98,8 +140,13 @@ export async function walkV5Graph(prompt: string, graph: GraphV5, opts: ExecuteO
     if (finalRd.confidence < LOW_CONFIDENCE) finalRd = { ...finalRd, lane: 'clarify', reason: `${finalRd.reason} (low confidence after reroute)` };
   }
 
-  // 3. clarify/unsupported → needs_input / run_error
-  if (finalRd.lane === 'clarify' || finalRd.lane === 'unsupported') {
+  // 3. clarify → durable pause（补充文本后重跑 Router）；unsupported → 终态 needs_input（超出能力）。
+  if (finalRd.lane === 'clarify') {
+    emitBoth({ type: 'route_decided', runId, branchId: 'main', nodeId: router.id, claim: null, decision: 'clarify', reason: finalRd.reason, timestamp: Date.now() });
+    pauseClarify(finalRd, prompt, 0);
+    return;
+  }
+  if (finalRd.lane === 'unsupported') {
     emitBoth({ type: 'route_decided', runId, branchId: 'main', nodeId: router.id, claim: null, decision: 'clarify', reason: finalRd.reason, timestamp: Date.now() });
     const text = finalRd.missingRequirements.length ? finalRd.missingRequirements.join('; ') : finalRd.reason;
     emitBoth({ type: 'branch_done', runId, branchId: 'main', cause: 'needs_input', finalArtifact: text, timestamp: Date.now() });
@@ -128,6 +175,10 @@ function safeResolve(graph: GraphV5, rd: RouteDecision, rerouted: boolean): RunP
 
 export async function resumeV5Graph(prompt: string, graph: GraphV5, opts: ExecuteOptions, checkpoint: V5GateCheckpoint, action: ResumeAction, exec: ExecNode): Promise<void> {
   return walkV5Graph(prompt, graph, opts, exec, 'auto', { checkpoint, action });
+}
+
+export async function resumeV5Clarify(prompt: string, graph: GraphV5, opts: ExecuteOptions, checkpoint: V5ClarifyCheckpoint, userResponse: string, exec: ExecNode): Promise<void> {
+  return walkV5Graph(prompt, graph, opts, exec, 'auto', undefined, { checkpoint, userResponse });
 }
 
 async function walkLane(

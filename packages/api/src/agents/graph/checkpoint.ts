@@ -46,18 +46,36 @@ export interface V5GateCheckpoint {
   expiresAt: number;
 }
 
-export type DurableCheckpoint = HarnessCheckpoint | V5GateCheckpoint;
+/** V5 clarify 检查点：Router 判定 clarify（缺关键信息）时落盘的路由状态，resume 补充文本后同 run 重跑 Router。 */
+export interface V5ClarifyCheckpoint {
+  runner: 'v5';
+  kind: 'clarify';
+  schemaVersion: 1;
+  branchId: string;
+  routeDecision: RouteDecision;
+  originalPrompt: string;
+  clarificationAttempts: number;
+  tokenHash: string;
+  expiresAt: number;
+}
+
+export type DurableCheckpoint = HarnessCheckpoint | V5GateCheckpoint | V5ClarifyCheckpoint;
 
 /** 解析 JSONL branch_checkpoint.payload 为判别联合；旧 V4（无 runner/kind）回退 v4-gate。 */
 export function parseDurableCheckpoint(raw: unknown): DurableCheckpoint {
   if (typeof raw !== 'object' || raw === null) throw new Error('invalid checkpoint payload');
   const r = raw as Record<string, unknown>;
   if (r.runner === 'v5' && r.kind === 'gate') return raw as V5GateCheckpoint;
+  if (r.runner === 'v5' && r.kind === 'clarify') return raw as V5ClarifyCheckpoint;
   return raw as HarnessCheckpoint;
 }
 
 export function isV5GateCheckpoint(cp: DurableCheckpoint): cp is V5GateCheckpoint {
   return (cp as { runner?: string }).runner === 'v5' && (cp as { kind?: string }).kind === 'gate';
+}
+
+export function isV5ClarifyCheckpoint(cp: DurableCheckpoint): cp is V5ClarifyCheckpoint {
+  return (cp as { runner?: string }).runner === 'v5' && (cp as { kind?: string }).kind === 'clarify';
 }
 
 /** 恒定时间比较 + 过期校验（V4/V5 通用）。 */
@@ -68,9 +86,9 @@ export function verifyDurableToken(cp: DurableCheckpoint, token: string): boolea
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-/** 该 checkpoint 允许的恢复动作（无 best 时不包含 continue_best；旧 V4 无 allowedActions 回退全三种）。 */
+/** 该 checkpoint 允许的恢复动作（无 best 时不包含 continue_best；旧 V4 无 allowedActions 回退全三种；clarify 不用 action）。 */
 export function allowedDurableActions(cp: DurableCheckpoint): ResumeAction[] {
-  return cp.allowedActions ?? (['continue_best', 'revise_once', 'fail'] as ResumeAction[]);
+  return (cp as { allowedActions?: ResumeAction[] }).allowedActions ?? (['continue_best', 'revise_once', 'fail'] as ResumeAction[]);
 }
 
 export function isAllowedDurableAction(cp: DurableCheckpoint, action: string): boolean {

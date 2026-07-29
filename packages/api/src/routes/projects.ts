@@ -45,8 +45,8 @@ import {
 import { resolveInstanceDescriptorPaths } from '../agents/node-instance.js';
 import { executeGraph, runAgentNode, type ExecuteOptions } from '../agents/graph/AgentRouter.js';
 import { resumeEvaluatorOptimizerGraph, type HarnessCheckpoint } from '../agents/graph/EvaluatorOptimizerRouter.js';
-import { resumeV5Graph } from '../agents/graph/V5Router.js';
-import { parseDurableCheckpoint, verifyDurableToken, isAllowedDurableAction, allowedDurableActions, isV5GateCheckpoint, type V5GateCheckpoint } from '../agents/graph/checkpoint.js';
+import { resumeV5Graph, resumeV5Clarify } from '../agents/graph/V5Router.js';
+import { parseDurableCheckpoint, verifyDurableToken, isAllowedDurableAction, allowedDurableActions, isV5GateCheckpoint, isV5ClarifyCheckpoint, type V5GateCheckpoint, type V5ClarifyCheckpoint } from '../agents/graph/checkpoint.js';
 import { invokeAgentWithPolicy } from '../agents/invoke-agent.js';
 import { buildThreadContext, buildServerContext } from '../agents/context-builder.js';
 import { snapshotRubrics } from '../agents/graph/evaluation.js';
@@ -917,18 +917,23 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
     '/api/projects/:projectId/run/:runId/resume',
     async (request, reply) => {
       const { projectId, runId } = request.params;
-      const body = (request.body ?? {}) as { branchId?: unknown; resumeToken?: unknown; action?: unknown };
-      if (typeof body.branchId !== 'string' || typeof body.resumeToken !== 'string' || !['continue_best', 'revise_once', 'fail'].includes(String(body.action))) {
-        return reply.code(400).send({ error: 'branchId, resumeToken and valid action are required' });
+      const body = (request.body ?? {}) as { branchId?: unknown; resumeToken?: unknown; action?: unknown; userResponse?: unknown };
+      const hasAction = typeof body.action === 'string' && ['continue_best', 'revise_once', 'fail'].includes(body.action);
+      const hasUserResponse = typeof body.userResponse === 'string' && body.userResponse.trim().length > 0;
+      if (typeof body.branchId !== 'string' || typeof body.resumeToken !== 'string' || (!hasAction && !hasUserResponse)) {
+        return reply.code(400).send({ error: 'branchId, resumeToken and either action or userResponse are required' });
       }
       const persisted = readPersistedRun(projectId, runId);
       if (!persisted.meta || (persisted.meta.graph.schemaVersion !== 4 && persisted.meta.graph.schemaVersion !== 5)) return reply.code(404).send({ error: 'paused run not found' });
       const checkpointEvent = [...persisted.events].reverse().find((event) => event.type === 'branch_checkpoint' && event.branchId === body.branchId);
       if (!checkpointEvent || checkpointEvent.type !== 'branch_checkpoint') return reply.code(404).send({ error: 'branch checkpoint not found' });
       const checkpoint = parseDurableCheckpoint(checkpointEvent.payload);
-      // V4.2: 校验 action ∈ checkpoint.allowedActions（无 best 时禁止 continue_best），在消费 token 之前。
-      if (!isAllowedDurableAction(checkpoint, String(body.action))) {
-        const reason = `action '${String(body.action)}' is not allowed for this checkpoint; allowed: ${allowedDurableActions(checkpoint).join(', ')}`;
+      const isClarify = isV5ClarifyCheckpoint(checkpoint);
+      // clarify 需 userResponse；gate 需 action ∈ allowedActions（无 best 禁 continue_best）。校验在消费 token 之前。
+      if (isClarify ? !hasUserResponse : !hasAction || (!isClarify && !isAllowedDurableAction(checkpoint, String(body.action)))) {
+        const reason = isClarify
+          ? 'clarify pause requires userResponse'
+          : `action '${String(body.action)}' is not allowed for this checkpoint; allowed: ${allowedDurableActions(checkpoint).join(', ')}`;
         const ev = { type: 'resume_rejected', runId, branchId: body.branchId, reason, timestamp: Date.now() } as const;
         recordRunEvent(projectId, runId, ev); socketManager.broadcastGraph(ev);
         return reply.code(409).send({ error: reason });
@@ -962,9 +967,11 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
           record: (event) => { recordRunEvent(projectId, runId, event); observeFinding(projectId, runId, event); },
         };
         const action = body.action as 'continue_best' | 'revise_once' | 'fail';
-        const runnerPromise = isV5GateCheckpoint(checkpoint)
-          ? resumeV5Graph(persisted.meta!.prompt, persisted.meta!.graph as Extract<AnyGraph, { schemaVersion: 5 }>, resumeOpts, checkpoint as V5GateCheckpoint, action, runAgentNode)
-          : resumeEvaluatorOptimizerGraph(persisted.meta!.prompt, persisted.meta!.graph as Extract<AnyGraph, { schemaVersion: 4 }>, resumeOpts, checkpoint as HarnessCheckpoint, action, runAgentNode);
+        const runnerPromise = isClarify
+          ? resumeV5Clarify(persisted.meta!.prompt, persisted.meta!.graph as Extract<AnyGraph, { schemaVersion: 5 }>, resumeOpts, checkpoint as V5ClarifyCheckpoint, body.userResponse as string, runAgentNode)
+          : isV5GateCheckpoint(checkpoint)
+            ? resumeV5Graph(persisted.meta!.prompt, persisted.meta!.graph as Extract<AnyGraph, { schemaVersion: 5 }>, resumeOpts, checkpoint as V5GateCheckpoint, action, runAgentNode)
+            : resumeEvaluatorOptimizerGraph(persisted.meta!.prompt, persisted.meta!.graph as Extract<AnyGraph, { schemaVersion: 4 }>, resumeOpts, checkpoint as HarnessCheckpoint, action, runAgentNode);
         runnerPromise.then(async () => {
           if (!terminal) return;
           const event: Extract<PublicGraphEvent, { type: 'run_done' | 'run_error' | 'run_aborted' }> = terminal;

@@ -185,7 +185,7 @@ describe('V4.2 blocked / best-candidate resume actions', () => {
   it('blocked with no best candidate → only revise_once|fail (forbids continue_best)', async () => {
     const scripted = scriptedExec({ 'plan-review': ['blocked'] });
     const { publicEvents, persisted } = await run(formalGraph(), scripted.exec);
-    const paused = publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_paused' }> => e.type === 'run_paused');
+    const paused = publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_paused'; pauseKind: 'gate' }> => e.type === 'run_paused' && e.pauseKind === 'gate');
     assert.ok(paused);
     assert.deepEqual(paused!.options, ['revise_once', 'fail']);
     const checkpoint = checkpointOf(persisted);
@@ -199,7 +199,7 @@ describe('V4.2 blocked / best-candidate resume actions', () => {
   it('blocked with a historical best candidate → allows continue_best', async () => {
     const scripted = scriptedExec({ 'plan-review': ['revise', 'blocked'] });
     const { publicEvents, persisted } = await run(formalGraph(), scripted.exec);
-    const paused = publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_paused' }> => e.type === 'run_paused');
+    const paused = publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_paused'; pauseKind: 'gate' }> => e.type === 'run_paused' && e.pauseKind === 'gate');
     assert.ok(paused);
     assert.deepEqual(paused!.options, ['continue_best', 'revise_once', 'fail']);
     const checkpoint = checkpointOf(persisted);
