@@ -6,80 +6,140 @@
   "nodes": [
     {
       "id": "__input__",
-      "type": "input"
+      "type": "input",
+      "position": {
+        "x": -446.42012724170894,
+        "y": -57.5469890007875
+      }
     },
     {
       "id": "router",
       "type": "router",
       "agentNodeKey": "opencode:project-router",
-      "policyRef": "router-policy.json"
+      "policyRef": "router-policy.json",
+      "position": {
+        "x": -89.83356826178449,
+        "y": 243.76589591545178
+      }
     },
     {
       "id": "responder",
       "type": "agent",
-      "agentNodeKey": "opencode:responder"
+      "agentNodeKey": "opencode:responder",
+      "position": {
+        "x": 213.6568535430078,
+        "y": 861.4497011875728
+      }
     },
     {
       "id": "investigator",
       "type": "agent",
-      "agentNodeKey": "opencode:investigator"
+      "agentNodeKey": "opencode:investigator",
+      "position": {
+        "x": -94.74467542192842,
+        "y": 1134.4107665480446
+      }
     },
     {
       "id": "architect",
       "type": "agent",
-      "agentNodeKey": "opencode:architect"
+      "agentNodeKey": "opencode:architect",
+      "position": {
+        "x": 745.9418656090604,
+        "y": 214.54571718906666
+      }
     },
     {
       "id": "plan-review",
       "type": "decision",
       "agentNodeKey": "codex:plan-reviewer",
-      "rubricRef": "rubric.json"
+      "rubricRef": "rubric.json",
+      "position": {
+        "x": 1235.4565852945486,
+        "y": 232.05173015128065
+      }
     },
     {
       "id": "implementer",
       "type": "agent",
-      "agentNodeKey": "opencode:implementer"
+      "agentNodeKey": "opencode:implementer",
+      "position": {
+        "x": 615.2611598367656,
+        "y": 480.59753955386446
+      }
     },
     {
       "id": "code-review",
       "type": "decision",
       "agentNodeKey": "codex:code-reviewer",
-      "rubricRef": "rubric.json"
+      "rubricRef": "rubric.json",
+      "position": {
+        "x": 1203.894614645654,
+        "y": 381.6389909859834
+      }
     },
     {
       "id": "security-review",
       "type": "decision",
       "agentNodeKey": "codex:security-review",
-      "rubricRef": "rubric.json"
+      "rubricRef": "rubric.json",
+      "position": {
+        "x": 1211.3792075472313,
+        "y": 518.8347263820136
+      }
     },
     {
       "id": "verify",
       "type": "decision",
       "agentNodeKey": "claude:verifier",
-      "rubricRef": "rubric.json"
+      "rubricRef": "rubric.json",
+      "position": {
+        "x": 1235.4565852945484,
+        "y": 649.3267636823381
+      }
     },
     {
       "id": "review-analyst",
       "type": "agent",
-      "agentNodeKey": "opencode:review-analyst"
+      "agentNodeKey": "opencode:review-analyst",
+      "position": {
+        "x": 118.67468733387201,
+        "y": 989.7284949805073
+      }
     },
     {
       "id": "verify-analyst",
       "type": "agent",
-      "agentNodeKey": "opencode:verify-analyst"
+      "agentNodeKey": "opencode:verify-analyst",
+      "position": {
+        "x": 446.7377749482605,
+        "y": 732.976245302867
+      }
     },
     {
       "id": "__knowledge__",
-      "type": "project_knowledge"
+      "type": "project_knowledge",
+      "position": {
+        "x": 930.7471700447657,
+        "y": -122.91762751011132
+      }
     },
     {
       "id": "scribe",
       "type": "documenter",
-      "agentNodeKey": "opencode:project-scribe"
+      "agentNodeKey": "opencode:project-scribe",
+      "position": {
+        "x": 1049.2365553754103,
+        "y": -21.60210912951274
+      }
     },
     {
       "id": "__end__",
-      "type": "end"
+      "type": "end",
+      "position": {
+        "x": 1236,
+        "y": 1358.7499084472656
+      }
     }
   ],
   "edges": [
