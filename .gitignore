@@ -37,6 +37,8 @@ agents/projects/*/graph-runs/
 # Step 2: Thread 跨轮对话（events.jsonl + summaries 本机状态，不跟踪）。
 agents/projects/*/threads/
 agents/projects/*/graph-runs/*.pending.json
+# Project Knowledge: issue 事实源本机状态，不跟踪（PROJECT_ISSUES.md 仅由 Publish 写回项目仓库）。
+agents/projects/*/knowledge/
 # 画布节点实例的运行态与 CLI 记忆（四层目录：projects/<id>/nodes/<prov>/<localId>/）。
 agents/projects/*/nodes/*/*/runtime/
 agents/projects/*/nodes/*/*/data/cli/

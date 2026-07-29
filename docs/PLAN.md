@@ -159,7 +159,7 @@
 | **V4.5** | 测试门槛贯穿：空 FINISH artifact 重试与失败 / 空 candidate 永不进 evaluator / blocked 无 best 拒 continue_best / blocked 有历史 best 允许 / Verify reject→Implementer→Code Reviewer→Verify / 多 gate 独立预算 / resume token 一次性过期非法 action / rubrics 用 run_meta 快照 / 前端刷新恢复 pause / V3 全套不回归 | ✅ 完成（V4.1/V4.2/V4.3/V4.4 相关项全覆盖；run_done quality + gate_blocked/candidate_rejected 事件已测；前端 sessionStorage 恢复由 web build+typecheck 保证） | — |
 | **V5 Schema** | RouterNode/ProjectKnowledgeNode/DocumenterNode + RouteEdge/ObserveEdge + forward/gate 加 lanes/minRisk + 校验 + RouteDecision + CreateRunRequest(intentMode) + RunCoordinator + 独立 runner 不读时迁移 | ✅ 完成（本提交） | — |
 | **V5 角色/模板** | 默认路线 direct_answer/investigate/plan_only/small_change/planned_change/review_only/verify_only + 高风险加 Security Reviewer + 发布部署迁移只产计划暂停 + 新项目默认 V5 模板 + opencode:project-router GLM-5.2 fresh + 缺 Provider 明确报告 | ✅ 完成（本提交） | — |
-| **Project Knowledge** | knowledge/ 事实源(.gitignore) + FindingEvent 状态机 + 服务端 fingerprint + API GET/confirm/resolve/accept/reopen/publish + Issues 面板 + Publish 路径 jail/secret scan/冲突/dirty-worktree | ❌ 未开始（commit #5） | — |
+| **Project Knowledge** | knowledge/ 事实源(.gitignore) + FindingEvent 状态机 + 服务端 fingerprint + API GET/confirm/resolve/accept/reopen/publish + Issues 面板 + Publish 路径 jail/secret scan/冲突/dirty-worktree | ✅ 完成（本提交，Issues 面板 UI 留 #7） | — |
 | **Project Scribe** | opencode:project-scribe GLM-5.2 可选 documenter 接 Knowledge observe 边 + 不进主链/不影响 run 成败 + 只输出 ISSUE_SUMMARY_DRAFT + 无 Scribe 时 IssueProjector 确定性模板 | ❌ 未开始（commit #6） | — |
 | **V5 画布/Issues UI** | 四泳道 Direct/Investigation/Engineering/Knowledge + Router 显示 lane/risk/confidence + Knowledge open/resolved 数 + Scribe 状态 + Issues 面板 | ❌ 未开始（commit #7） | — |
 | **能力策略/迁移文档** | 应用层 CapabilityPolicy（projectRead/Write、commandExec、network、externalSideEffects 各角色）+ V3→legacy/V4→保持/V4→V5 预览式显式升级 + OpenCode/Claude 不构成硬隔离 | ❌ 未开始（commit #8） | — |
@@ -194,7 +194,9 @@
 
 - **V5 角色/模板（本提交）**：`v5-workspace.ts` `V5_ROLES`（11 角色：project-router/responder/investigator/architect/plan-review/implementer/code-review/security-review/verify/review-analyst/verify-analyst；opencode 角色用 GLM-5.2，codex/claude 各自默认）+ `getDefaultV5ProjectGraph()` 7 通道模板（plan_only 发布/部署/迁移到此结束不自动执行；planned_change 经 Architect→Plan Review→Implementer→Code/Security/Verify；security gate lanes=[planned_change] minRisk=high 故 small_change 跳过）+ `scaffoldV5Workspace(pid)` 实例化角色节点（decision 角色写默认 rubric）+ 写 V5 图，幂等。`graph.ts` `validateV5Topology` forward≤1 改为 **per-lane**（无 lanes 视为永远活跃不与其它共存；同 lane 最多一 forward）——允许 architect 有 plan_only/planned_change 两条 forward。`V5Router.walkLane` gate 按 lane 过滤（small_change 跳 security）。`projects.ts` POST /api/projects 建项目后调 scaffoldV5Workspace（既有项目/test 不自动升级）。buildAgent 已对未注册 provider 明确抛错（不静默替换）。测试：v5-workspace(7)+模板 lane(2)。
 
-**累计测试 143 过**（commit #4 新增 9）；api+web typecheck 绿；web build 绿；启动烟测 200。
+- **Project Knowledge（本提交）**：`knowledge/issue-store.ts` FindingEvent 事件源（issues.events.jsonl append-only + issues.index.json 可重建缓存）+ 状态机（observed→confirmed/open→resolved/accepted/superseded）+ `computeFingerprint`（服务端稳定字段 sha256，禁止 LLM 自造 ID）+ `recordFinding`（同 fingerprint 的开放问题追加 evidence/occurrence 不新建；run 完成/abort 不自动关闭）+ confirm/resolve/accept/reopen（非法状态拒绝）+ `fold` 重建索引。`knowledge/publish.ts` `projectIssuesMarkdown`（IssueProjector 确定性模板：open/closed 分组 + severity + source + occurrences）+ `publishIssues`（路径 jail 不得逃逸 projectPath + secret scan 拒可疑密钥 + dirty-worktree 拒覆盖未提交改动 + 原子写 `<projectPath>/docs/agent-team/PROJECT_ISSUES.md`）。`projects.ts` observeFinding 挂到 record 回调（node_error/run_error/gate_status blocked·exhausted/gate_blocked/evaluation blocked/run_done best_effort 遗留 → observed；run_error 确证）+ issues CRUD 路由（GET/confirm/resolve/accept/reopen/publish）。`.gitignore` 加 knowledge/。测试：issue-store(7)+publish(2)。
+
+**累计测试 152 过**（commit #5 新增 9）；api+web typecheck 绿；web build 绿；启动烟测 /api/providers+/api/projects/default/issues（{issues:[]}）200。
 
 ### 重要提醒
 
@@ -205,5 +207,5 @@
 
 ### 下一步
 
-- **V5 schema + Coordinator + 角色/模板 完成（commit #3-4）**。下一步 commit #5 Project Knowledge（knowledge/ 事实源 + FindingEvent 状态机 + API + Issues 面板）→ #6 Scribe → #7 画布/Issues UI → #8 能力策略/迁移文档。
+- **V5 schema + Coordinator + 角色/模板 + Project Knowledge 完成（commit #3-5）**。下一步 commit #6 Scribe（opencode:project-scribe 接 Knowledge observe 边）→ #7 画布/Issues UI → #8 能力策略/迁移文档。
 

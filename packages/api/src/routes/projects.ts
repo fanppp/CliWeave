@@ -49,6 +49,8 @@ import { invokeAgentWithPolicy } from '../agents/invoke-agent.js';
 import { buildThreadContext, buildServerContext } from '../agents/context-builder.js';
 import { snapshotRubrics } from '../agents/graph/evaluation.js';
 import { scaffoldV5Workspace } from '../agents/graph/v5-workspace.js';
+import { listIssues, recordFinding, confirmIssue, resolveIssue, acceptIssue, reopenIssue, IssueError } from '../agents/knowledge/issue-store.js';
+import { publishIssues, PublishError } from '../agents/knowledge/publish.js';
 import {
   closeRunStream,
   listRuns,
@@ -85,7 +87,7 @@ import {
 } from '../agents/graph/graph.js';
 import { resolveGlob } from '../utils/glob.js';
 import { getProjectRoot } from '../utils/project-root.js';
-import type { PublicGraphEvent, SocketManager } from '../infrastructure/websocket/SocketManager.js';
+import type { PublicGraphEvent, PersistedRunEvent, SocketManager } from '../infrastructure/websocket/SocketManager.js';
 
 export interface ProjectsRouteOptions {
   socketManager: SocketManager;
@@ -96,6 +98,40 @@ function readText(path: string): string | undefined {
     return readFileSync(path, 'utf-8');
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Knowledge 观察者：把运行事件投影为 observed finding（不确证，除非 run_error/Verifier 证据）。
+ * 来源：node_error / run_error / gate 阻塞·耗尽 / evaluation blocked / run_done best_effort 遗留风险。
+ * 单次 reviewer revise 只产生 observed；run 完成/abort 不自动关闭。
+ */
+function observeFinding(projectId: string, runId: string, event: PersistedRunEvent): void {
+  switch (event.type) {
+    case 'node_error':
+      recordFinding(projectId, { source: { runId, nodeId: event.nodeId }, title: `节点错误: ${event.nodeId}`, detail: event.error, severity: 'warning', evidence: event.error });
+      break;
+    case 'run_error':
+      recordFinding(projectId, { source: { runId }, title: '运行失败', detail: event.error, severity: 'blocking', evidence: event.error, confirmed: true });
+      break;
+    case 'gate_status':
+      if (event.status === 'blocked') recordFinding(projectId, { source: { runId, gateId: event.gateId }, title: `Gate 阻塞: ${event.gateId}`, detail: `branch ${event.branchId}`, severity: 'blocking' });
+      else if (event.status === 'exhausted') recordFinding(projectId, { source: { runId, gateId: event.gateId }, title: `Gate 耗尽: ${event.gateId}`, detail: `branch ${event.branchId}`, severity: 'warning' });
+      break;
+    case 'gate_blocked':
+      recordFinding(projectId, { source: { runId, gateId: event.gateId }, title: `评估阻塞: ${event.gateId}`, detail: event.reason, severity: 'blocking', evidence: event.reason });
+      break;
+    case 'evaluation_done':
+      if (event.evaluation.verdict === 'blocked') recordFinding(projectId, { source: { runId, gateId: event.gateId }, title: `评估阻塞: ${event.gateId}`, detail: event.evaluation.reason ?? 'blocked', severity: 'blocking' });
+      break;
+    case 'run_done':
+      // continue_best 遗留风险：未解决 gate 各记一条 observed。
+      if (event.termination === 'best_effort' && event.quality?.unresolvedGateIds) {
+        for (const gid of event.quality.unresolvedGateIds) recordFinding(projectId, { source: { runId, gateId: gid }, title: `best-effort 遗留风险: ${gid}`, detail: 'continue_best 放行了未解决的 gate', severity: 'warning' });
+      }
+      break;
+    default:
+      break;
   }
 }
 
@@ -826,6 +862,7 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
           },
           record: (event) => {
             recordRunEvent(projectId, runId, event);
+            observeFinding(projectId, runId, event);
           },
           signal: controller.signal,
         }).then(async () => {
@@ -919,7 +956,7 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
           runId, projectId, contextPrefix, runMode: persisted.meta!.runMode, gatePolicyOverrides: persisted.meta!.gatePolicyOverrides, rubrics: persisted.meta!.rubrics,
           signal: controller.signal,
           emit: (event) => { socketManager.broadcastGraph(event); if (event.type === 'run_done' || event.type === 'run_error' || event.type === 'run_aborted') terminal = event; else if (event.type === 'run_paused') transitionRunStatus(runId, 'paused'); },
-          record: (event) => recordRunEvent(projectId, runId, event),
+          record: (event) => { recordRunEvent(projectId, runId, event); observeFinding(projectId, runId, event); },
         }, checkpoint, body.action as 'continue_best' | 'revise_once' | 'fail', runAgentNode).then(async () => {
           if (!terminal) return;
           const event: Extract<PublicGraphEvent, { type: 'run_done' | 'run_error' | 'run_aborted' }> = terminal;
@@ -940,6 +977,30 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
       });
     },
   );
+
+  // ── Project Knowledge: issues 账本 ─────────────────────────────
+  app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/issues', async (request) => {
+    return { issues: listIssues(request.params.projectId) };
+  });
+
+  app.post<{ Params: { projectId: string; issueId: string } }>('/api/projects/:projectId/issues/:issueId/confirm', async (request, reply) => {
+    try { return confirmIssue(request.params.projectId, request.params.issueId); } catch (err) { return reply.code(409).send({ error: (err as Error).message }); }
+  });
+  app.post<{ Params: { projectId: string; issueId: string } }>('/api/projects/:projectId/issues/:issueId/resolve', async (request, reply) => {
+    try { return resolveIssue(request.params.projectId, request.params.issueId); } catch (err) { return reply.code(409).send({ error: (err as Error).message }); }
+  });
+  app.post<{ Params: { projectId: string; issueId: string } }>('/api/projects/:projectId/issues/:issueId/accept', async (request, reply) => {
+    try { return acceptIssue(request.params.projectId, request.params.issueId); } catch (err) { return reply.code(409).send({ error: (err as Error).message }); }
+  });
+  app.post<{ Params: { projectId: string; issueId: string } }>('/api/projects/:projectId/issues/:issueId/reopen', async (request, reply) => {
+    try { return reopenIssue(request.params.projectId, request.params.issueId); } catch (err) { return reply.code(409).send({ error: (err as Error).message }); }
+  });
+  app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/issues/publish', async (request, reply) => {
+    try { return publishIssues(request.params.projectId); } catch (err) {
+      const code = err instanceof PublishError ? 409 : 400;
+      return reply.code(code).send({ error: (err as Error).message });
+    }
+  });
 
   app.post<{ Params: { projectId: string; runId: string } }>(
     '/api/projects/:projectId/run/:runId/abort',
