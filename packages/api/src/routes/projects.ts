@@ -834,6 +834,12 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
                   quality: {
                     status: 'done', termination: terminal.termination,
                     ...(terminal.reason ? { reason: terminal.reason } : {}),
+                    ...(terminal.quality ? {
+                      runQualityStatus: terminal.quality.status,
+                      exhausted: terminal.quality.exhausted,
+                      ...(terminal.quality.bestCandidateId ? { bestCandidateId: terminal.quality.bestCandidateId } : {}),
+                      ...(terminal.quality.unresolvedGateIds.length ? { unresolvedGateIds: terminal.quality.unresolvedGateIds } : {}),
+                    } : {}),
                   },
                 })
               : await failTurn(projectId, threadId, runId, turnId, {
@@ -879,10 +885,17 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
       const checkpoint = checkpointEvent.payload as HarnessCheckpoint;
       // V4.2: 校验 action ∈ checkpoint.allowedActions（无 best 时禁止 continue_best），在消费 token 之前。
       if (!isAllowedResumeAction(checkpoint, String(body.action))) {
-        return reply.code(409).send({ error: `action '${String(body.action)}' is not allowed for this checkpoint; allowed: ${(checkpoint.allowedActions ?? (['continue_best', 'revise_once', 'fail'] as ResumeAction[])).join(', ')}` });
+        const reason = `action '${String(body.action)}' is not allowed for this checkpoint; allowed: ${(checkpoint.allowedActions ?? (['continue_best', 'revise_once', 'fail'] as ResumeAction[])).join(', ')}`;
+        const ev = { type: 'resume_rejected', runId, branchId: body.branchId, reason, timestamp: Date.now() } as const;
+        recordRunEvent(projectId, runId, ev); socketManager.broadcastGraph(ev);
+        return reply.code(409).send({ error: reason });
       }
       const consumed = persisted.events.some((event) => event.type === 'run_state' && event.phase === 'resume_token_consumed' && (event.payload as { tokenHash?: unknown })?.tokenHash === checkpoint.tokenHash);
-      if (consumed || !verifyCheckpointToken(checkpoint, body.resumeToken)) return reply.code(409).send({ error: 'resume token is invalid, expired, or already used' });
+      if (consumed || !verifyCheckpointToken(checkpoint, body.resumeToken)) {
+        const ev = { type: 'resume_rejected', runId, branchId: body.branchId, reason: 'resume token is invalid, expired, or already used', timestamp: Date.now() } as const;
+        recordRunEvent(projectId, runId, ev); socketManager.broadcastGraph(ev);
+        return reply.code(409).send({ error: 'resume token is invalid, expired, or already used' });
+      }
       const entry = getRun(runId);
       if (entry && entry.status !== 'paused') return reply.code(409).send({ error: `run is not paused (status=${entry.status})` });
       const threadId = persisted.meta.threadId;
@@ -908,7 +921,7 @@ const projectsRoutes: FastifyPluginCallback<ProjectsRouteOptions> = (app, option
           if (!terminal) return;
           const event: Extract<PublicGraphEvent, { type: 'run_done' | 'run_error' | 'run_aborted' }> = terminal;
           const updated = event.type === 'run_done'
-            ? await completeTurn(projectId, threadId, runId, turnId, { finalArtifact: event.finalText, quality: { status: 'done', termination: event.termination, ...(event.reason ? { reason: event.reason } : {}) } })
+            ? await completeTurn(projectId, threadId, runId, turnId, { finalArtifact: event.finalText, quality: { status: 'done', termination: event.termination, ...(event.reason ? { reason: event.reason } : {}), ...(event.quality ? { runQualityStatus: event.quality.status, exhausted: event.quality.exhausted, ...(event.quality.bestCandidateId ? { bestCandidateId: event.quality.bestCandidateId } : {}), ...(event.quality.unresolvedGateIds.length ? { unresolvedGateIds: event.quality.unresolvedGateIds } : {}) } : {}) } })
             : await failTurn(projectId, threadId, runId, turnId, { status: event.type === 'run_aborted' ? 'aborted' : 'error', ...(event.type === 'run_error' ? { reason: event.error } : {}) });
           transitionRunStatus(runId, event.type === 'run_done' ? 'done' : event.type === 'run_aborted' ? 'aborted' : 'error');
           if (updated) {

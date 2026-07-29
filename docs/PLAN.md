@@ -154,9 +154,9 @@
 | **V4 Harness** | V4 schema（decision/gate/rework + maxRevisions/onExhausted/onBlocked）+ `walkEvaluatorOptimizerGraph`/`resumeEvaluatorOptimizerGraph` + `evaluation.ts`（selectBest/extractEvaluation/snapshotRubrics/evaluatorPrompt/revisionPrompt）+ `completion.ts`（extractCompletion/AUTO_ROUTE_INSTRUCTION ROUTE 控制块）+ `HarnessCheckpoint`/`verifyCheckpointToken`/pause-resume + `projects.ts` resume 路由 + `gatePolicyOverrides` + rubric 路径 jail + run_meta.rubrics 快照 + resumeToken 净化 | ✅ **早已存在**（V3/V4 双 runner，不读时迁移） | — |
 | **V4.1** | 修复 Auto 提前结束：extractCompletion 四分类（empty_artifact/unsafe_category/malformed_control/missing_control）+ FINISH 空 artifact 定向重试 Architect 一次 + 仍空→run_error + 任意 work 空输出永不进 Decision | ✅ 完成（本提交） | — |
 | **V4.2** | 修复 blocked/bestCandidate：HarnessCheckpoint.allowedActions/bestCandidateId/pauseReason + blocked 不参选（rank null）+ 无 best 只 revise_once|fail 禁 continue_best + 有历史 best 才 allow continue_best + Resume API 校验 action∈allowedActions（`isAllowedResumeAction`）+ revise_once 从该 work 第一 gate 重审 + 前端按钮来自服务端 options | ✅ 完成（本提交） | — |
-| **V4.3** | 完成质量 Payload：WorkPayload{payload, quality{status,exhausted,bestCandidateId,evaluations,unresolvedGateIds}} + 下游只用 payload + quality 独立元数据 + evaluator 自然语言永不作主 payload + continue_best 保留未解决 gate/evaluation + Thread turn 存 artifact 与质量摘要 | ❌ 未开始（commit #2） | — |
-| **V4.4** | 事件和恢复：补齐 gate_blocked/candidate_rejected/resume_rejected 事件 + 公开 event 与内部 checkpoint 分离 + token hash/到期/allowedActions 写 JSONL + 前端 sessionStorage + 服务重启扫 paused checkpoint 恢复 RunRegistry + token 消费在 Thread/checkpoint/动作全校验后 + V4 仍限单 input 分支 | ❌ 未开始（commit #2） | — |
-| **V4.5** | 测试门槛贯穿：空 FINISH artifact 重试与失败 / 空 candidate 永不进 evaluator / blocked 无 best 拒 continue_best / blocked 有历史 best 允许 / Verify reject→Implementer→Code Reviewer→Verify / 多 gate 独立预算 / resume token 一次性过期非法 action / rubrics 用 run_meta 快照 / 前端刷新恢复 pause / V3 全套不回归 | 🟡 部分完成（V4.1/V4.2 相关项已覆盖；V4.3/V4.4 相关项待 commit #2） | — |
+| **V4.3** | 完成质量 Payload：WorkPayload{payload, quality{status,exhausted,bestCandidateId,unresolvedGateIds}} + 下游只用 payload + quality 独立元数据 + evaluator 自然语言永不作主 payload + continue_best 保留未解决 gate/evaluation + Thread turn 存 artifact 与质量摘要 | ✅ 完成（本提交） | — |
+| **V4.4** | 事件和恢复：补齐 gate_blocked/candidate_rejected/resume_rejected 事件 + 公开 event 与内部 checkpoint 分离 + token hash/到期/allowedActions 写 JSONL（branch_checkpoint）+ 前端 sessionStorage + 服务重启扫 paused checkpoint 恢复 RunRegistry（index.ts 早已接线）+ token 消费在全校验后 | ✅ 完成（本提交） | — |
+| **V4.5** | 测试门槛贯穿：空 FINISH artifact 重试与失败 / 空 candidate 永不进 evaluator / blocked 无 best 拒 continue_best / blocked 有历史 best 允许 / Verify reject→Implementer→Code Reviewer→Verify / 多 gate 独立预算 / resume token 一次性过期非法 action / rubrics 用 run_meta 快照 / 前端刷新恢复 pause / V3 全套不回归 | ✅ 完成（V4.1/V4.2/V4.3/V4.4 相关项全覆盖；run_done quality + gate_blocked/candidate_rejected 事件已测；前端 sessionStorage 恢复由 web build+typecheck 保证） | — |
 | **V5 Schema** | RouterNode/ProjectKnowledgeNode/DocumenterNode + RouteEdge/ObserveEdge + forward/gate 加 lanes/minRisk + 校验 + RouteDecision + CreateRunRequest(intentMode) + RunCoordinator + 独立 runner 不读时迁移 | ❌ 未开始（commit #3） | — |
 | **V5 角色/模板** | 默认路线 direct_answer/investigate/plan_only/small_change/planned_change/review_only/verify_only + 高风险加 Security Reviewer + 发布部署迁移只产计划暂停 + 新项目默认 V5 模板 + opencode:project-router GLM-5.2 fresh + 缺 Provider 明确报告 | ❌ 未开始（commit #4） | — |
 | **Project Knowledge** | knowledge/ 事实源(.gitignore) + FindingEvent 状态机 + 服务端 fingerprint + API GET/confirm/resolve/accept/reopen/publish + Issues 面板 + Publish 路径 jail/secret scan/冲突/dirty-worktree | ❌ 未开始（commit #5） | — |
@@ -167,7 +167,7 @@
 ### 三问状态
 
 - **Q2 多轮记忆**：✅ **后端完成**（Step 2+3）。Thread 事件源 + ContextBuilder 把"最近 8 轮 Q&A + summary + pins + serverContext"前置注入每个节点 prompt，历史 `[untrusted data]` 包裹防注入、超预算裁最旧；永不裁 system/当前消息/上游 payload。每个 work 节点 fresh 跑，靠构造 prompt 携带跨轮记忆。前端未接线（Step 7/commit #7）。
-- **Q1 智能终止**：🟡 **V4 已实现首节点 auto-route 早结束（FINISH simple_answer→early_complete），V4.1 已硬化**（空 artifact 重试、unsafe_category 强制 forward、空输出不进 gate）。完整 CompletionClaim disposition（finish|forward）+ branch 级早结束留 V5 Coordinator。
+- **Q1 智能终止**：🟢 **V4 auto-route 早结束 + V4.1 已硬化 + V4.3 完成质量 Payload**（FINISH simple_answer→early_complete；空 artifact 重试；unsafe_category 强制 forward；空输出不进 gate；run_done 带 RunQuality{status,exhausted,bestCandidateId,unresolvedGateIds}；continue_best 保留未解决 gate）。完整 CompletionClaim disposition + branch 级早结束留 V5 Coordinator。
 - **Q3 从节点开始**：❌ 未动（V5 RunEntry / commit #3-4）。注：Step 1B 的 `POST /api/projects/:pid/nodes` 是创建节点**实例**，不是"从某节点发起 run"。
 
 ### 关键设计决策（已锁定）
@@ -188,8 +188,10 @@
 - **V4 Harness（早已存在）**：`EvaluatorOptimizerRouter.ts`（walk/resume + HarnessCheckpoint + verifyCheckpointToken + pause + Architect auto-route + 多 gate 有序 + selectBest best-effort + candidate/evaluation 事件源）、`evaluation.ts`（Rubric zod + readDecisionRubric 路径 jail + snapshotRubrics + extractEvaluation malformed 重试1次→blocked + selectBest 排除 blocked + evaluatorPrompt untrusted_candidate 包裹）、`completion.ts`（ROUTE 控制块 + SAFE_FINISH + 保守 forward）、`graph.ts` V4 schema + validateV4Topology/validateV4Runnable（单 input 分支）、`graph-run-store.ts` resumeToken 净化 + rubrics 快照、`projects.ts` resume 路由 + gatePolicyOverrides + snapshotRubrics。测试：evaluator-optimizer-router(5)+evaluation(3)+completion(4)+graph+agent-router。
 - **V4.1（本提交）**：`completion.ts` 加 `CompletionDiagnostic`（ok/empty_artifact/unsafe_category/malformed_control/missing_control）+ `completionRetryPrompt`，**保持 V3 决策语义不变**（finish+空→forward、clarify+空→clarify，V4 靠 claim+diagnostic 触发重试）；`EvaluatorOptimizerRouter` firstWork auto：声明 FINISH/CLARIFY 但空 artifact → 定向重试 Architect 一次（`completionRetryPrompt`），仍空→run_error；任意 work 空输出→run_error 不进 gate。
 - **V4.2（本提交）**：`HarnessCheckpoint` 加 `allowedActions`/`bestCandidateId?`/`pauseReason`；blocked/exhausted 分支计算 best（selectBest 已排除 blocked via rank null）→ 无 best 只 `[revise_once,fail]`，有 best 才加 `continue_best`；`pause()` emit options 来自 allowedActions + run_state 带 pauseReason/bestCandidateId；`isAllowedResumeAction` 导出供路由+测试；`projects.ts` resume 路由在消费 token 前校验 action∈allowedActions（409）；evaluatorMalformed→pauseReason 'malformed'；前端 `GraphRunPanel` 按钮从 `paused.options` 渲染。测试：completion(8)+evaluator-optimizer-router(15)+isAllowedResumeAction。
+- **V4.3（本提交）**：`SocketManager` 加 `RunQuality{status,exhausted,bestCandidateId?,unresolvedGateIds}` + `run_done.quality?`；`EvaluatorOptimizerRouter` walkBranch 跟踪 `unresolvedGateIds`/`exhausted`/`bestCandidateId`（continue_best 记跳过的 gate；exhausted 自动放行记 gate+exhausted；resume 延续 checkpoint 里的 unresolved/exhausted）；BranchResult 带 quality，run_done 聚合；`HarnessCheckpoint` 加 `unresolvedGateIds?`/`exhausted?`（resume 延续）；`thread-store` `TurnQuality` 放宽含 V4 字段，`projects.ts` /run/start + /resume 的 completeTurn 注入 run_done.quality（payload=finalArtifact 是主体，quality 独立元数据）。
+- **V4.4（本提交）**：`SocketManager` 加 `gate_blocked`/`candidate_rejected`/`resume_rejected` 事件；`EvaluatorOptimizerRouter` blocked 分支发 gate_blocked+candidate_rejected，revise 路径发 candidate_rejected（被超越候选），exhausted 自动放行记 unresolved；`projects.ts` resume 路由两处拒绝点发 resume_rejected（emit+record，无 token 泄漏——run_paused 仅 emit 不 record，原始 token 只经 WS/API）；前端 `graphRunStore` sessionStorage 存/取/清 resumeToken（per-project，到期自清），setProjectId 恢复 paused+currentRunId，run_resumed/resume_rejected/run_done/run_aborted/run_error 清理。服务重启扫 paused（`index.ts` listRecoverablePausedRuns→registerRun）早已存在。
 
-**累计测试 107 过**（含 V4.1/V4.2 新增 12 例：completion +6、V4 router +10、isAllowedResumeAction +1）；api+web typecheck 绿；web build 绿；启动烟测 /api/providers+/api/projects 200（tsx watch 热重载未崩）。
+**累计测试 111 过**（V4.3/V4.4 新增 4 例：run_done approved/best_effort quality + gate_blocked/candidate_rejected 事件）；api+web typecheck 绿；web build 绿；启动烟测 /api/providers+/api/projects 200。
 
 ### 重要提醒
 
@@ -200,6 +202,5 @@
 
 ### 下一步
 
-- **commit #2**：V4.3 WorkPayload 质量 + V4.4 事件/恢复（gate_blocked/candidate_rejected/resume_rejected + token hash/allowedActions 写 JSONL + 前端 sessionStorage + 服务重启扫 paused checkpoint 恢复 RunRegistry）。
-- 之后 commit #3 V5 schema+Coordinator → #4 V5 角色/模板 → #5 Project Knowledge → #6 Scribe → #7 画布/Issues UI → #8 能力策略/迁移文档。
+- **V4 稳定化完成（V4.1-V4.5 全绿）**，作为 V5 基线。下一步 commit #3 V5 schema + RouteDecision + RunCoordinator（独立 runner，不读时迁移）→ #4 V5 角色/模板 → #5 Project Knowledge → #6 Scribe → #7 画布/Issues UI → #8 能力策略/迁移文档。
 

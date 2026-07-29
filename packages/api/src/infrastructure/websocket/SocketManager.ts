@@ -12,6 +12,19 @@ import type { CompletionClaim } from '../../agents/graph/completion.js';
 import type { Candidate, Evaluation } from '../../agents/graph/evaluation.js';
 
 /**
+ * V4.3 完成质量摘要：与 run_done/Thread turn 绑定。payload 是下游唯一可见主体；quality 是独立元数据。
+ * - status: approved=所有 gate 通过；best_effort=有 gate 经 continue_best 放行。
+ * - exhausted: 是否有 gate 耗尽预算。
+ * - unresolvedGateIds: 经 continue_best 跳过、未获 approve 的 gate。
+ */
+export interface RunQuality {
+  status: 'approved' | 'best_effort';
+  exhausted: boolean;
+  bestCandidateId?: string;
+  unresolvedGateIds: string[];
+}
+
+/**
  * 图运行事件类型（分型，防 Phase 2a 的 run_state/branch_checkpoint 被误广播）。
  * - PublicGraphEvent：可经 SocketManager.broadcastGraph 广播给前端。
  * - PersistedRunEvent：可经 record 落盘 JSONL = 公开事件 + 内部事件（run_state/branch_checkpoint 仅落盘，不广播）。
@@ -40,8 +53,11 @@ export type PublicGraphEvent =
   | { type: 'evaluation_done'; runId: string; branchId: string; gateId: string; decisionNodeId: string; evaluation: Evaluation; timestamp: number }
   | { type: 'best_candidate_selected'; runId: string; branchId: string; gateId: string; candidateId: string; timestamp: number }
   | { type: 'gate_status'; runId: string; branchId: string; gateId: string; status: 'running' | 'approved' | 'exhausted' | 'blocked'; timestamp: number }
+  | { type: 'gate_blocked'; runId: string; branchId: string; gateId: string; candidateId: string; reason: string; timestamp: number }
+  | { type: 'candidate_rejected'; runId: string; branchId: string; gateId: string; candidateId: string; verdict: 'revise' | 'blocked'; timestamp: number }
   | { type: 'run_paused'; runId: string; projectId: string; branchId: string; gateId: string; question: string; options: ('continue_best' | 'revise_once' | 'fail')[]; resumeToken: string; expiresAt: number }
   | { type: 'run_resumed'; runId: string; branchId: string; gateId: string }
+  | { type: 'resume_rejected'; runId: string; branchId: string; reason: string; timestamp: number }
   | { type: 'thread_committed'; runId: string; threadId: string; turnId: string; revision: number; status: 'completed' | 'failed' }
   | {
       type: 'run_done';
@@ -50,6 +66,8 @@ export type PublicGraphEvent =
       /** completed=自然结束；best_effort=回边预算耗尽后 best-effort 放行；edge_limit=旧 V3 历史回放兼容；global_limit=全局执行上限。 */
       termination: 'completed' | 'early_complete' | 'needs_input' | 'best_effort' | 'edge_limit' | 'global_limit';
       reason?: string;
+      /** V4.3: 完成质量摘要（V4 runner 填充；V3 legacy 缺省）。Thread turn 同时保存。 */
+      quality?: RunQuality;
     }
   | { type: 'run_aborted'; runId: string }
   | { type: 'run_error'; runId: string; error: string };

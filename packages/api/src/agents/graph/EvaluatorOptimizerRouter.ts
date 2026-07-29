@@ -6,6 +6,7 @@ import { AUTO_ROUTE_INSTRUCTION, completionRetryPrompt, extractCompletion } from
 import { evaluatorPrompt, extractEvaluation, readDecisionRubric, revisionPrompt, selectBest, type Candidate, type Evaluation } from './evaluation.js';
 import type { ExhaustedPolicy, GraphV4 } from './graph.js';
 import type { ExecNode, ExecuteOptions } from './AgentRouter.js';
+import type { RunQuality } from '../../infrastructure/websocket/SocketManager.js';
 
 export interface HarnessCheckpoint {
   schemaVersion: 1;
@@ -26,9 +27,12 @@ export interface HarnessCheckpoint {
   allowedActions: ResumeAction[];
   bestCandidateId?: string;
   pauseReason: 'exhausted' | 'blocked' | 'malformed';
+  /** V4.3: resume 时延续的未解决 gate 与 exhausted 标记（continue_best 保留未解决 gate）。 */
+  unresolvedGateIds?: string[];
+  exhausted?: boolean;
 }
 
-type BranchResult = { status: 'completed' | 'early_complete' | 'best_effort'; output: string } | { status: 'paused' } | { status: 'error'; error: string } | { status: 'aborted' };
+type BranchResult = { status: 'completed' | 'early_complete' | 'best_effort'; output: string; quality: RunQuality } | { status: 'paused' } | { status: 'error'; error: string } | { status: 'aborted' };
 
 const tokenHash = (token: string): string => createHash('sha256').update(token).digest('hex');
 
@@ -91,10 +95,15 @@ export async function walkEvaluatorOptimizerGraph(prompt: string, graph: GraphV4
     let upstreamArtifact = branchResume?.checkpoint.upstreamArtifact ?? prompt;
     let firstWork = !branchResume;
     let degraded = branchResume?.checkpoint.degraded ?? false;
+    // V4.3: 跟踪未解决 gate / exhausted / bestCandidateId，供 run_done + Thread turn 质量摘要。
+    let unresolvedGateIds: string[] = branchResume ? [...(branchResume.checkpoint.unresolvedGateIds ?? [])] : [];
+    let exhausted = branchResume?.checkpoint.exhausted ?? false;
+    let bestCandidateId: string | undefined;
+    const branchQuality = (): RunQuality => ({ status: degraded ? 'best_effort' : 'approved', exhausted, ...(bestCandidateId ? { bestCandidateId } : {}), unresolvedGateIds });
     while (true) {
       if (signal?.aborted) return { status: 'aborted' };
       const node = byId.get(nodeId);
-      if (!node || node.type === 'end') return { status: degraded ? 'best_effort' : 'completed', output: upstreamArtifact };
+      if (!node || node.type === 'end') return { status: degraded ? 'best_effort' : 'completed', output: upstreamArtifact, quality: branchQuality() };
       if (node.type !== 'agent') return { status: 'error', error: `main chain target '${nodeId}' is not work` };
 
       let revision = branchResume ? Math.max(...branchResume.checkpoint.candidates.map((c) => c.revision)) : 0;
@@ -134,7 +143,7 @@ export async function walkEvaluatorOptimizerGraph(prompt: string, graph: GraphV4
           if (routed.decision === 'finish' || routed.decision === 'clarify') {
             if (!artifact) return { status: 'error', error: `work '${node.id}' empty ${routed.decision} artifact` };
             emitBoth({ type: 'branch_done', runId, branchId, cause: routed.decision === 'finish' ? 'early_complete' : 'needs_input', finalArtifact: artifact, timestamp: Date.now() });
-            return { status: 'early_complete', output: artifact };
+            return { status: 'early_complete', output: artifact, quality: branchQuality() };
           }
         }
         // V4.1: 任意 work 空输出都不得进入 Decision。
@@ -149,7 +158,7 @@ export async function walkEvaluatorOptimizerGraph(prompt: string, graph: GraphV4
       if (branchResume) {
         emitBoth({ type: 'run_resumed', runId, branchId, gateId: gates[gateIndex]?.id ?? 'unknown' });
         if (branchResume.action === 'fail') return { status: 'error', error: `run failed by user at gate '${gates[gateIndex]?.id ?? 'unknown'}'` };
-        if (branchResume.action === 'continue_best') { degraded = true; gateIndex++; }
+        if (branchResume.action === 'continue_best') { degraded = true; const skipped = gates[gateIndex]?.id; if (skipped && !unresolvedGateIds.includes(skipped)) unresolvedGateIds.push(skipped); gateIndex++; }
         else {
           const evaluation = candidate.evaluations[gates[gateIndex]?.id ?? ''];
           if (!evaluation) return { status: 'error', error: 'resume checkpoint evaluation missing' };
@@ -190,13 +199,16 @@ export async function walkEvaluatorOptimizerGraph(prompt: string, graph: GraphV4
         const policy: ExhaustedPolicy = opts.gatePolicyOverrides?.[gate.id] ?? gate.onExhausted;
         if (evaluation.verdict === 'blocked') {
           emitBoth({ type: 'gate_status', runId, branchId, gateId: gate.id, status: 'blocked', timestamp: Date.now() });
+          emitBoth({ type: 'gate_blocked', runId, branchId, gateId: gate.id, candidateId: candidate.id, reason: evaluation.verdict === 'blocked' ? evaluation.reason : 'blocked', timestamp: Date.now() });
+          emitBoth({ type: 'candidate_rejected', runId, branchId, gateId: gate.id, candidateId: candidate.id, verdict: 'blocked', timestamp: Date.now() });
           if (gate.onBlocked === 'fail') return { status: 'error', error: `gate '${gate.id}' blocked: ${evaluation.reason}` };
           const bestBlocked = selectBest(candidates, gate.id, rubric);
           const allowedBlocked: ResumeAction[] = bestBlocked ? ['continue_best', 'revise_once', 'fail'] : ['revise_once', 'fail'];
-          return pause(branchId, gate.id, { prompt, branchId, workNodeId: node.id, upstreamArtifact, candidates, currentCandidateId: bestBlocked?.id ?? candidate.id, ...(workerSessionId ? { workerSessionId } : {}), gateIndex, gateCounts, degraded, nextForwardNodeId: forwardFrom(node.id)?.target, pauseReason: evaluatorMalformed ? 'malformed' : 'blocked', allowedActions: allowedBlocked, ...(bestBlocked ? { bestCandidateId: bestBlocked.id } : {}) });
+          return pause(branchId, gate.id, { prompt, branchId, workNodeId: node.id, upstreamArtifact, candidates, currentCandidateId: bestBlocked?.id ?? candidate.id, ...(workerSessionId ? { workerSessionId } : {}), gateIndex, gateCounts, degraded, nextForwardNodeId: forwardFrom(node.id)?.target, pauseReason: evaluatorMalformed ? 'malformed' : 'blocked', allowedActions: allowedBlocked, ...(bestBlocked ? { bestCandidateId: bestBlocked.id } : {}), unresolvedGateIds, exhausted });
         }
         const used = gateCounts[gate.id] ?? 0;
         if (used < gate.maxRevisions) {
+          emitBoth({ type: 'candidate_rejected', runId, branchId, gateId: gate.id, candidateId: candidate.id, verdict: 'revise', timestamp: Date.now() });
           gateCounts[gate.id] = used + 1;
           revision++;
           const revised = await invoke(node, revisionPrompt(prompt, candidate.artifact, evaluation), revision + 1, workerSessionId ? { mode: 'resume', sessionId: workerSessionId, persistActive: false } : { mode: 'fresh', persistActive: false });
@@ -215,15 +227,19 @@ export async function walkEvaluatorOptimizerGraph(prompt: string, graph: GraphV4
         // V4.2: 无 best → 只允许 revise_once|fail（禁 continue_best）；有 best → 允许 continue_best。
         const allowedExhausted: ResumeAction[] = best ? ['continue_best', 'revise_once', 'fail'] : ['revise_once', 'fail'];
         if (policy === 'ask_user' || !best) {
-          return pause(branchId, gate.id, { prompt, branchId, workNodeId: node.id, upstreamArtifact, candidates, currentCandidateId: best?.id ?? candidate.id, ...(workerSessionId ? { workerSessionId } : {}), gateIndex, gateCounts, degraded, nextForwardNodeId: forwardFrom(node.id)?.target, pauseReason: 'exhausted', allowedActions: allowedExhausted, ...(best ? { bestCandidateId: best.id } : {}) });
+          return pause(branchId, gate.id, { prompt, branchId, workNodeId: node.id, upstreamArtifact, candidates, currentCandidateId: best?.id ?? candidate.id, ...(workerSessionId ? { workerSessionId } : {}), gateIndex, gateCounts, degraded, nextForwardNodeId: forwardFrom(node.id)?.target, pauseReason: 'exhausted', allowedActions: allowedExhausted, ...(best ? { bestCandidateId: best.id } : {}), unresolvedGateIds, exhausted: true });
         }
         // policy === 'continue_best' 且有 best → 自动 best-effort 放行（不暂停）。
+        if (!unresolvedGateIds.includes(gate.id)) unresolvedGateIds.push(gate.id);
+        exhausted = true;
+        bestCandidateId = best.id;
         candidate = best; artifact = best.artifact; degraded = true; gateIndex++;
       }
       upstreamArtifact = candidate.artifact;
+      bestCandidateId = candidate.id;
       branchResume = undefined;
       const next = forwardFrom(node.id);
-      if (!next) return { status: degraded ? 'best_effort' : 'completed', output: upstreamArtifact };
+      if (!next) return { status: degraded ? 'best_effort' : 'completed', output: upstreamArtifact, quality: branchQuality() };
       nodeId = next.target;
     }
   }
@@ -237,7 +253,16 @@ export async function walkEvaluatorOptimizerGraph(prompt: string, graph: GraphV4
   const finalText = outputs.join('\n\n---\n\n');
   if (!finalText) { finish({ type: 'run_error', runId, error: 'no V4 producer artifact' }); return; }
   const termination = results.some((r) => r.status === 'best_effort') ? 'best_effort' : results.every((r) => r.status === 'early_complete') ? 'early_complete' : 'completed';
-  finish({ type: 'run_done', runId, finalText, termination });
+  // V4.3: 聚合分支质量摘要（payload 是下游唯一主体；quality 独立元数据，Thread turn 同时保存）。
+  const completed = results.filter((r): r is Extract<BranchResult, { quality: RunQuality }> => 'quality' in r);
+  const bestId = completed.map((r) => r.quality.bestCandidateId).find(Boolean);
+  const quality: RunQuality | undefined = completed.length ? {
+    status: completed.some((r) => r.quality.status === 'best_effort') ? 'best_effort' : 'approved',
+    exhausted: completed.some((r) => r.quality.exhausted),
+    unresolvedGateIds: completed.flatMap((r) => r.quality.unresolvedGateIds),
+    ...(bestId ? { bestCandidateId: bestId } : {}),
+  } : undefined;
+  finish({ type: 'run_done', runId, finalText, termination, ...(quality ? { quality } : {}) });
 }
 
 export async function resumeEvaluatorOptimizerGraph(prompt: string, graph: GraphV4, opts: ExecuteOptions, checkpoint: HarnessCheckpoint, action: ResumeAction, exec: ExecNode): Promise<void> {

@@ -239,3 +239,38 @@ describe('V4.2 blocked / best-candidate resume actions', () => {
     assert.equal(isAllowedResumeAction(legacy, 'continue_best'), true);
   });
 });
+
+describe('V4.3 quality payload + V4.4 events', () => {
+  it('run_done carries approved quality when all gates approve', async () => {
+    const scripted = scriptedExec({ 'plan-review': ['approve'], 'code-review': ['approve'], verify: ['approve'] });
+    const { publicEvents } = await run(formalGraph(), scripted.exec);
+    const done = publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_done' }> => e.type === 'run_done');
+    assert.equal(done?.quality?.status, 'approved');
+    assert.equal(done?.quality?.exhausted, false);
+    assert.deepEqual(done?.quality?.unresolvedGateIds, []);
+  });
+
+  it('run_done carries best_effort quality with the unresolved gate on continue_best', async () => {
+    const scripted = scriptedExec({ 'plan-review': ['approve'], 'code-review': ['revise'], verify: ['approve'] });
+    const { publicEvents } = await run(formalGraph({ code: { maxRevisions: 0, onExhausted: 'continue_best' } }), scripted.exec);
+    const done = publicEvents.find((e): e is Extract<PublicGraphEvent, { type: 'run_done' }> => e.type === 'run_done');
+    assert.equal(done?.termination, 'best_effort');
+    assert.equal(done?.quality?.status, 'best_effort');
+    assert.equal(done?.quality?.exhausted, true);
+    assert.ok(done?.quality?.unresolvedGateIds.includes('gate-code'));
+    assert.ok(done?.quality?.bestCandidateId);
+  });
+
+  it('blocked verdict emits gate_blocked and candidate_rejected', async () => {
+    const scripted = scriptedExec({ 'plan-review': ['blocked'] });
+    const { publicEvents } = await run(formalGraph(), scripted.exec);
+    assert.ok(publicEvents.some((e) => e.type === 'gate_blocked'));
+    assert.ok(publicEvents.some((e) => e.type === 'candidate_rejected' && e.verdict === 'blocked'));
+  });
+
+  it('revise verdict emits candidate_rejected before the revision', async () => {
+    const scripted = scriptedExec({ 'plan-review': ['revise', 'approve'], 'code-review': ['approve'], verify: ['approve'] });
+    const { publicEvents } = await run(formalGraph(), scripted.exec);
+    assert.ok(publicEvents.some((e) => e.type === 'candidate_rejected' && e.verdict === 'revise'));
+  });
+});

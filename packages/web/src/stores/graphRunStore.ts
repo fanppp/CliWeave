@@ -34,6 +34,13 @@ export interface Graph {
   edges: GraphEdge[];
 }
 
+export interface RunQuality {
+  status: 'approved' | 'best_effort';
+  exhausted: boolean;
+  bestCandidateId?: string;
+  unresolvedGateIds: string[];
+}
+
 export type GraphEvent =
   | { type: 'node_started'; runId: string; nodeId: string }
   | { type: 'node_iteration'; runId: string; nodeId: string; iteration: number }
@@ -62,14 +69,18 @@ export type GraphEvent =
   | { type: 'evaluation_done'; runId: string; branchId: string; gateId: string; decisionNodeId: string; evaluation: { verdict: 'approve' | 'revise' | 'blocked'; feedback?: string; reason?: string }; timestamp: number }
   | { type: 'best_candidate_selected'; runId: string; branchId: string; gateId: string; candidateId: string; timestamp: number }
   | { type: 'gate_status'; runId: string; branchId: string; gateId: string; status: 'running' | 'approved' | 'exhausted' | 'blocked'; timestamp: number }
+  | { type: 'gate_blocked'; runId: string; branchId: string; gateId: string; candidateId: string; reason: string; timestamp: number }
+  | { type: 'candidate_rejected'; runId: string; branchId: string; gateId: string; candidateId: string; verdict: 'revise' | 'blocked'; timestamp: number }
   | { type: 'run_paused'; runId: string; projectId: string; branchId: string; gateId: string; question: string; options: ('continue_best' | 'revise_once' | 'fail')[]; resumeToken: string; expiresAt: number }
   | { type: 'run_resumed'; runId: string; branchId: string; gateId: string }
+  | { type: 'resume_rejected'; runId: string; branchId: string; reason: string; timestamp: number }
   | {
       type: 'run_done';
       runId: string;
       finalText: string;
       termination: 'completed' | 'early_complete' | 'needs_input' | 'best_effort' | 'edge_limit' | 'global_limit';
       reason?: string;
+      quality?: RunQuality;
     }
   | { type: 'run_aborted'; runId: string }
   | { type: 'run_error'; runId: string; error: string };
@@ -141,6 +152,28 @@ function removeActive(list: string[], id: string): string[] {
   return list.filter((x) => x !== id);
 }
 
+// V4.4: 把当前 resumeToken 存 sessionStorage，刷新后可继续当前浏览器会话恢复 pause 操作（per-project，到期自清）。
+const pausedResumeKey = (projectId: string): string => `cliweave:paused-resume:${projectId}`;
+type PausedEvent = Extract<GraphEvent, { type: 'run_paused' }>;
+function savePausedResume(projectId: string, event: PausedEvent): void {
+  if (typeof sessionStorage === 'undefined') return;
+  try { sessionStorage.setItem(pausedResumeKey(projectId), JSON.stringify(event)); } catch { /* quota / disabled */ }
+}
+function loadPausedResume(projectId: string): PausedEvent | null {
+  if (typeof sessionStorage === 'undefined') return null;
+  try {
+    const raw = sessionStorage.getItem(pausedResumeKey(projectId));
+    if (!raw) return null;
+    const event = JSON.parse(raw) as PausedEvent;
+    if (event.expiresAt < Date.now()) { sessionStorage.removeItem(pausedResumeKey(projectId)); return null; }
+    return event;
+  } catch { return null; }
+}
+function clearPausedResume(projectId: string): void {
+  if (typeof sessionStorage === 'undefined') return;
+  try { sessionStorage.removeItem(pausedResumeKey(projectId)); } catch { /* ignore */ }
+}
+
 export const useGraphRunStore = create<GraphRunState>((set, get) => ({
   graph: null,
   replayGraph: null,
@@ -162,7 +195,10 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
   setGatePolicyOverride: (gateId, policy) => set((s) => ({ gatePolicyOverrides: { ...s.gatePolicyOverrides, [gateId]: policy } })),
   loadGraph: (g) => set({ graph: g }),
   setGraph: (g) => set({ graph: g }),
-  setProjectId: (id) => set({ projectId: id, graph: null, bubbles: [], status: 'idle', activeNodeIds: [], nodeIterations: {}, currentRunId: null, selectedAgentNodeKey: null, selectedGraphNodeId: null, replayGraph: null, gatePolicyOverrides: {}, paused: null }),
+  setProjectId: (id) => {
+    const restored = loadPausedResume(id);
+    set({ projectId: id, graph: null, bubbles: [], status: restored ? 'paused' : 'idle', activeNodeIds: [], nodeIterations: {}, currentRunId: restored?.runId ?? null, selectedAgentNodeKey: null, selectedGraphNodeId: null, replayGraph: null, gatePolicyOverrides: {}, paused: restored });
+  },
   loadProjectGraph: async () => {
     const pid = get().projectId;
     try {
@@ -322,10 +358,20 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
         }
         case 'gate_status':
         case 'best_candidate_selected':
-        case 'run_resumed':
           return s;
+        case 'run_resumed': {
+          clearPausedResume(s.projectId);
+          return { ...s, status: 'running', paused: null, activeNodeIds: [] };
+        }
+        case 'resume_rejected': {
+          // token 非法/过期/已用或 action 不允许：服务端仍 paused，但本浏览器会话的 token 已不可用 → 清掉，不再提供按钮。
+          clearPausedResume(s.projectId);
+          const bubble: GraphBubble = { id: nextId(), nodeId: '__run__', role: 'system', content: `恢复被拒：${event.reason}`, eventType: event.type, timestamp: Date.now() };
+          return { ...s, bubbles: [...s.bubbles, bubble], paused: null };
+        }
         case 'run_paused': {
           const bubble: GraphBubble = { id: nextId(), nodeId: '__run__', role: 'system', content: `${event.question}\nGate: ${event.gateId}`, eventType: event.type, timestamp: Date.now() };
+          savePausedResume(s.projectId, event);
           return { ...s, bubbles: [...s.bubbles, bubble], status: 'paused', paused: event, activeNodeIds: [] };
         }
         case 'run_done': {
@@ -346,6 +392,7 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
           };
           // run_done 本身就是公开终态；thread_committed 仅刷新 durable Thread revision。
           // 不能依赖后一事件收口 UI：旧服务/旧 JSONL/瞬时断线都可能没有该事件。
+          clearPausedResume(s.projectId);
           return { ...s, bubbles: [...s.bubbles, bubble], status: 'done', activeNodeIds: [], paused: null };
         }
         case 'run_aborted': {
@@ -357,7 +404,8 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
             eventType: 'run_aborted',
             timestamp: Date.now(),
           };
-          return { ...s, bubbles: [...s.bubbles, bubble], status: 'idle', activeNodeIds: [] };
+          clearPausedResume(s.projectId);
+          return { ...s, bubbles: [...s.bubbles, bubble], status: 'idle', activeNodeIds: [], paused: null };
         }
         case 'run_error': {
           const bubble: GraphBubble = {
@@ -368,7 +416,8 @@ export const useGraphRunStore = create<GraphRunState>((set, get) => ({
             eventType: 'run_error',
             timestamp: Date.now(),
           };
-          return { ...s, bubbles: [...s.bubbles, bubble], status: 'error', activeNodeIds: [] };
+          clearPausedResume(s.projectId);
+          return { ...s, bubbles: [...s.bubbles, bubble], status: 'error', activeNodeIds: [], paused: null };
         }
         default:
           return s;

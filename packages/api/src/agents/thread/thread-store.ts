@@ -32,6 +32,18 @@ export interface ThreadMeta {
   updatedAt: number;
 }
 
+/** V4.3: turn_completed 质量摘要（payload=finalArtifact 是主体；quality 是独立元数据）。 */
+export interface TurnQuality {
+  status: string;
+  termination: string;
+  reason?: string;
+  /** V4 runner 完成质量（V3 legacy 缺省）。 */
+  runQualityStatus?: 'approved' | 'best_effort';
+  exhausted?: boolean;
+  bestCandidateId?: string;
+  unresolvedGateIds?: string[];
+}
+
 export type ThreadEvent =
   | { type: 'turn_opened'; turnId: string; runId: string; seq: number; userMessage: string; createdAt: number }
   | {
@@ -39,7 +51,7 @@ export type ThreadEvent =
       turnId: string;
       runId: string;
       finalArtifact: string;
-      quality?: { status: string; termination: string; reason?: string };
+      quality?: TurnQuality;
       completedAt: number;
     }
   | { type: 'turn_failed'; turnId: string; runId: string; status: 'error' | 'aborted'; reason?: string; completedAt: number }
@@ -250,7 +262,7 @@ export function completeTurn(
   threadId: string,
   runId: string,
   turnId: string,
-  result: { finalArtifact: string; quality?: { status: string; termination: string; reason?: string } },
+  result: { finalArtifact: string; quality?: TurnQuality },
 ): Promise<ThreadMeta | null> {
   return withNodeLock(`thread:${projectId}:${threadId}`, async () => {
     const meta = readThread(projectId, threadId);
